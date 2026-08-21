@@ -1,6 +1,6 @@
 # ZorpInvader
 
-**Internet-scale API key scanner** — finds exposed secrets across the entire IPv4 space in under 6 minutes.
+**Internet-scale API key scanner** — finds exposed secrets across the entire IPv4 space
 
 ZorpInvader performs asynchronous SYN stealth scanning using raw sockets, discovers open HTTP ports, fetches web pages and JavaScript bundles, then detects leaked API keys using Aho-Corasick multi-pattern matching against **54 known provider prefixes**. Discovered keys are verified live against **47 provider APIs** and written to CSV.
 
