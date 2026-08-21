@@ -1,0 +1,26 @@
+# Cargo
+/target/
+
+# Build output
+/bin/
+*.o
+
+# Runtime output
+found_keys.csv
+keys.csv
+paused.conf
+*.pcap
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+/tmp/
