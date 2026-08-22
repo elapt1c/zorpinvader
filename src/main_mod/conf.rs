@@ -435,6 +435,14 @@ pub struct Zorp {
     /// Include "safe" key patterns (e.g. Stripe publishable keys) that are
     /// designed to be public/client-side. Disabled by default.
     pub include_safe: bool,
+
+    /// Stride for index iteration — skip this many indices per step to spread
+    /// coverage across the full IPv4 space quickly (spirograph pattern).
+    /// Computed automatically from range size if not set (default: range/64).
+    pub stride: u64,
+
+    /// Resume a previous scan from paused.conf instead of starting fresh.
+    pub auto_resume: bool,
 }
 
 impl Default for Zorp {
@@ -501,6 +509,8 @@ impl Default for Zorp {
             config_files: Vec::new(),
             tpc: 16,
             include_safe: false,
+            stride: 0,
+            auto_resume: false,
         }
     }
 }
@@ -1080,6 +1090,16 @@ impl Zorp {
                 self.include_safe = Self::parse_boolean(value);
             }
 
+            "stride" => {
+                self.stride = value
+                    .parse()
+                    .map_err(|_| format!("stride: invalid number: {}", value))?;
+            }
+
+            "resume" | "auto-resume" => {
+                self.auto_resume = Self::parse_boolean(value);
+            }
+
             // Silently ignore some parameters
             "randomize-hosts" | "send-eth" | "nobacktrace" | "backtrace" => {}
 
@@ -1216,6 +1236,8 @@ Common options:
     --rate <packets/s>   Scan speed (default: 100)
     --tpc <n>            Fetcher threads per core (default: 16, max: 32)
     --include-safe       Also detect "safe" keys (Stripe publishable, customer IDs)
+    --stride <n>         Index stride for spirograph coverage (default: range/64)
+    --resume             Resume previous scan from paused.conf
     --banners            Enable banner/API key scanning (required)
     --adapter-ip <ip>    Set source IP manually
     --adapter-mac <mac>  Set source MAC manually
@@ -1231,15 +1253,20 @@ config file from current settings:
         );
     }
 
-    /// Save current state to a configuration file for resuming.
-    pub fn save_state(&self) -> Result<(), String> {
+    /// Save current scan state to paused.conf for resuming.
+    ///
+    /// `index` is the current position in the index space.
+    pub fn save_state(&self, index: u64) -> Result<(), String> {
         let filename = "paused.conf";
-        eprintln!("saving resume file to: {}", filename);
 
         let mut file = File::create(filename).map_err(|e| format!("{}: {}", filename, e))?;
 
+        writeln!(file, "# ZorpInvader scan state — auto-saved").ok();
+        writeln!(file, "# Resume with: zorpinvader --resume").ok();
         writeln!(file, "rate = {}", self.max_rate).ok();
         writeln!(file, "seed = {}", self.seed).ok();
+        writeln!(file, "stride = {}", self.stride).ok();
+        writeln!(file, "resume-index = {}", index).ok();
 
         if !self.nic.is_empty() && !self.nic[0].ifname.is_empty() {
             writeln!(file, "adapter = {}", self.nic[0].ifname).ok();
@@ -1253,11 +1280,44 @@ config file from current settings:
             writeln!(file, "ports = {}", self.ports).ok();
         }
 
-        if self.resume.index > 0 {
-            writeln!(file, "resume-index = {}", self.resume.index).ok();
+        Ok(())
+    }
+
+    /// Load scan state from paused.conf and apply it to this config.
+    /// Returns `true` if a state file was found and loaded.
+    pub fn load_state(&mut self) -> bool {
+        let filename = "paused.conf";
+        let contents = match std::fs::read_to_string(filename) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, val)) = line.split_once('=') {
+                let key = key.trim();
+                let val = val.trim();
+                match key {
+                    "resume-index" => {
+                        if let Ok(v) = val.parse::<u64>() {
+                            self.resume.index = v;
+                        }
+                    }
+                    "stride" => {
+                        if let Ok(v) = val.parse::<u64>() {
+                            self.stride = v;
+                        }
+                    }
+                    _ => {} // ignore other keys — they'll be re-parsed normally
+                }
+            }
         }
 
-        Ok(())
+        eprintln!("[+] resumed from {} (index={}, stride={})", filename, self.resume.index, self.stride);
+        true
     }
 
     /// Get the number of configured NICs.

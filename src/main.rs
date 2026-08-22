@@ -78,12 +78,8 @@ fn ipv4_to_string(ip: u32) -> String {
 
 fn transmit_thread(parms: Arc<ThreadPair>) {
     let zorp = &parms.zorp;
-    let retries = zorp.retries as u64;
-    let rate = zorp.max_rate as u64;
-    let mut r = retries + 1;
     let seed = zorp.seed;
     let nic_count = zorp.nic_count() as u64;
-    let increment = zorp.shard.of as u64 * nic_count;
 
     log::info!("[+] starting transmit thread #{}", parms.nic_index);
 
@@ -126,24 +122,40 @@ fn transmit_thread(parms: Arc<ThreadPair>) {
     let tmplset = &parms.tmplset;
     let mut px = [0u8; 2048];
 
+    // Compute stride for spirograph-style coverage.
+    // Stride = range/64 ensures we sweep the full IPv4 space in 64 big steps,
+    // then spiral back to fill in the gaps. Must be odd (coprime with powers of 2).
+    let base_range = count_ipv4 * count_ports + count_ipv6 * count_ports;
+    let mut stride = if zorp.stride > 0 {
+        zorp.stride
+    } else {
+        (base_range / 64).max(1)
+    };
+    if stride % 2 == 0 {
+        stride |= 1; // ensure odd for coprimality
+    }
+
+    // Each NIC/shard starts at a different offset so they don't overlap.
+    let shard_start = (zorp.shard.one as u64 - 1) * nic_count + parms.nic_index as u64;
+    let step = stride * nic_count * zorp.shard.of as u64;
+
+    // Resume from saved position if available.
+    let mut current = if zorp.resume.index > 0 {
+        zorp.resume.index
+    } else {
+        shard_start
+    };
+
+    let mut last_save = std::time::Instant::now();
+
+    log::info!("[+] transmit thread #{}: stride={}, start={}", parms.nic_index, stride, current);
+
     'infinite: loop {
-        let range = count_ipv4 * count_ports + count_ipv6 * count_ports;
+        let range = base_range;
         let range_ipv6 = count_ipv6 * count_ports;
         let blackrock = BlackRock::init(range, seed, zorp.blackrock_rounds);
 
-        let start = zorp.resume.index
-            + (zorp.shard.one as u64 - 1) * nic_count
-            + parms.nic_index as u64;
-        let mut end = range;
-        if zorp.resume.count > 0 && end > start + zorp.resume.count {
-            end = start + zorp.resume.count;
-        }
-        end += retries * range;
-
-        log::trace!("THREAD: xmit: main loop: [{}..{}]", start, end);
-
-        let mut i = start;
-        while i < end {
+        while current < range {
             // Throttle SYN scan if fetcher queue is backing up
             let qdepth = parms.fetcher.queue_depth();
             if qdepth > 4096 {
@@ -152,19 +164,10 @@ fn transmit_thread(parms: Arc<ThreadPair>) {
             }
 
             let batch_size = throttler.next_batch(0);
-
             let mut remaining = batch_size;
-            while remaining > 0 && i < end {
-                let mut xx = i + r * rate;
-                r = r.wrapping_sub(1);
-                if rate > range {
-                    xx %= range;
-                } else {
-                    while xx >= range {
-                        xx -= range;
-                    }
-                }
-                let xx = blackrock.shuffle(xx);
+
+            while remaining > 0 && current < range {
+                let xx = blackrock.shuffle(current);
 
                 if xx < range_ipv6 {
                     // Skip IPv6 for now
@@ -173,19 +176,16 @@ fn transmit_thread(parms: Arc<ThreadPair>) {
                     let ip_them = targets.ipv4.pick(xx % count_ipv4);
                     let port_them = targets.ports.pick(xx / count_ipv4);
 
-                    // Compute SYN cookie as sequence number
                     let cookie = syn_cookie::syn_cookie_ipv4(
                         ip_them, port_them, ip_me, port_me as u32, entropy,
                     );
                     let seqno = cookie as u32;
 
-                    // Build packet from template
                     let len = pkt::template_set_target_ipv4(
                         tmplset, ip_them, port_them, ip_me, port_me, seqno, &mut px,
                     );
 
                     if len > 0 {
-                        // Send the raw SYN packet
                         let _ = adapter.send_packet(&px[..len]);
                     }
 
@@ -194,13 +194,32 @@ fn transmit_thread(parms: Arc<ThreadPair>) {
 
                 remaining -= 1;
 
-                if r == 0 {
-                    i += increment;
-                    r = retries + 1;
+                // Advance by stride (spirograph step)
+                current += step;
+                if current >= range {
+                    // Completed a full sweep — advance offset and wrap
+                    let offset = (current % stride) + shard_start;
+                    if offset < stride {
+                        current = offset;
+                    } else {
+                        // All offsets covered — full scan complete
+                        current = range;
+                    }
                 }
             }
 
-            parms.my_index.store(i, Ordering::SeqCst);
+            parms.my_index.store(current, Ordering::SeqCst);
+
+            // Periodic save every 60 seconds
+            if last_save.elapsed() >= Duration::from_secs(60) {
+                parms.my_index.store(current, Ordering::SeqCst);
+                if let Err(e) = zorp.save_state(current) {
+                    log::warn!("[save] failed: {}", e);
+                } else {
+                    log::info!("[save] progress saved (index={})", current);
+                }
+                last_save = std::time::Instant::now();
+            }
 
             if globals::is_tx_done() {
                 break;
@@ -208,10 +227,15 @@ fn transmit_thread(parms: Arc<ThreadPair>) {
         }
 
         if zorp.is_infinite && !globals::is_tx_done() {
+            current = shard_start; // restart from beginning
             continue 'infinite;
         }
         break;
     }
+
+    // Final save on completion
+    let _ = zorp.save_state(current);
+    log::info!("[save] final state saved (index={})", current);
 
     log::info!("[+] transmit thread #{} complete", parms.nic_index);
 
@@ -501,6 +525,19 @@ fn main_scan(zorp: Arc<Zorp>) -> i32 {
             source_mac.addr[3], source_mac.addr[4], source_mac.addr[5]));
     eprintln!("[+] source port: {}, entropy: 0x{:016x}", source_port, entropy);
 
+    // Compute and display stride
+    let stride_display = if zorp.stride > 0 {
+        zorp.stride
+    } else {
+        let s = (range / 64).max(1);
+        if s % 2 == 0 { s | 1 } else { s }
+    };
+    eprintln!("[+] stride: {} (spirograph coverage, ~{:.0} passes to complete)",
+        stride_display, range as f64 / stride_display as f64);
+    if zorp.resume.index > 0 {
+        eprintln!("[+] resuming from index {}", zorp.resume.index);
+    }
+
     // --- Build the greyhat API key scanning pipeline ---
     let scanner = Arc::new(GreyhatScanner::new(zorp.include_safe));
     let verifier = Arc::new(Verifier::new(0));
@@ -711,6 +748,15 @@ fn main() {
         }
         if zorp.ports.is_empty() {
             zorp.ports = "80,8080,8443,8000,3000,5000,8888".to_string();
+        }
+    }
+
+    // Load saved scan state if --resume was passed
+    if zorp.auto_resume {
+        if zorp.load_state() {
+            // State loaded successfully
+        } else {
+            eprintln!("[!] --resume: no paused.conf found, starting fresh");
         }
     }
 
