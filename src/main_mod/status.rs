@@ -135,7 +135,7 @@ impl Status {
         fetcher: &Fetcher,
         verifier: &Verifier,
     ) {
-        let _ = (total_tcbs, total_syns, exiting);
+        let _ = (total_tcbs, exiting);
 
         globals::update_global_now();
 
@@ -152,13 +152,21 @@ impl Status {
 
         let avg_rate: f64 = self.last_rates.iter().sum::<f64>() / 8.0;
         let kpps = pps / 1000.0;
-        let percent_done = if max_count > 0 {
+
+        // pass% = position within current stride sweep (cycles 0→99%)
+        let pass_pct = if max_count > 0 {
             (count as f64 * 100.0) / max_count as f64
         } else {
             0.0
         };
+        // total% = overall scan progress based on total SYNs sent (capped at 100%)
+        let total_pct = if max_count > 0 {
+            ((total_syns as f64 * 100.0) / max_count as f64).min(100.0)
+        } else {
+            0.0
+        };
         let time_remaining = if avg_rate > 0.0 {
-            (1.0 - percent_done / 100.0) * (max_count as f64 / avg_rate)
+            (max_count.saturating_sub(total_syns)) as f64 / avg_rate
         } else {
             0.0
         };
@@ -177,10 +185,10 @@ impl Status {
 
         if json_status {
             eprintln!(
-                r#"{{"status":"{}","rate_kpps":{:.2},"progress_pct":{:.2},"eta":"{:02}:{:02}:{:02}","found":{},"keys_valid":{},"keys_detected":{},"html_sites":{},"fetcher_pages":{},"fetcher_scripts":{},"fetcher_queue":{}}}"#,
+                r#"{{"status":"{}","rate_kpps":{:.2},"pass_pct":{:.1},"total_pct":{:.1},"eta":"{:02}:{:02}:{:02}","found":{},"keys_valid":{},"keys_detected":{},"html_sites":{},"fetcher_pages":{},"fetcher_scripts":{},"fetcher_queue":{}}}"#,
                 if globals::is_tx_done() { "Waiting" } else { "Scanning" },
                 kpps,
-                percent_done,
+                pass_pct, total_pct,
                 hours, minutes, seconds,
                 total_synacks,
                 valid, keys_found, html_sites,
@@ -195,16 +203,16 @@ impl Status {
             eprint!("\x1b[1;1H\x1b[2K\x1b[44;37m ZorpInvader \u{2502} Status: {} \u{2502} Keys: {}/{}/{} \x1b[0m\n",
                 status_str, valid, keys_found, html_sites);
 
-            // Row 2: Rate, position/total, ETA, found ports
+            // Row 2: Rate, pass%/total%, ETA, found ports
             let rate_str = if pps <= 0.0 {
-                format!("{:6.2} kpps", kpps)
+                format!("{:.2} kpps", kpps)
             } else if pps >= 1_000_000.0 {
                 format!("{:.2} Mpps", pps / 1_000_000.0)
             } else {
                 format!("{:.2} kpps", kpps)
             };
-            eprint!("\x1b[2;1H\x1b[2K \x1b[32mRate:\x1b[0m {} \u{2502} \x1b[36mProgress:\x1b[0m {}/{} ({:.1}%) \u{2502} \x1b[33mETA:\x1b[0m {:02}:{:02}:{:02} \u{2502} \x1b[31mFound:\x1b[0m {}\n",
-                rate_str, count, max_count, percent_done, hours, minutes, seconds, total_synacks);
+            eprint!("\x1b[2;1H\x1b[2K \x1b[32mRate:\x1b[0m {} \u{2502} \x1b[36mProgress:\x1b[0m {:.0}%/{:.0}% \u{2502} \x1b[33mETA:\x1b[0m {:02}:{:02}:{:02} \u{2502} \x1b[31mFound:\x1b[0m {}\n",
+                rate_str, pass_pct, total_pct, hours, minutes, seconds, total_synacks);
 
             // Row 3: Separator
             eprint!("\x1b[3;1H\x1b[2K\x1b[37m{}\x1b[0m\n", sep);

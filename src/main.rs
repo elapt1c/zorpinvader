@@ -628,7 +628,7 @@ fn main_scan(zorp: Arc<Zorp>) -> i32 {
         last_syns = total_syns;
         last_time = now;
 
-        if idx >= range && total_syns > 0 && !zorp.is_infinite {
+        if (total_syns >= range || idx >= range) && total_syns > 0 && !zorp.is_infinite {
             globals::set_tx_done(true);
         }
 
