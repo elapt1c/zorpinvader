@@ -146,7 +146,7 @@ impl Status {
             return;
         }
 
-        let rate = (count - self.last.count) as f64 / elapsed_time;
+        let rate = count.saturating_sub(self.last.count) as f64 / elapsed_time;
         self.last_rates[self.last_count & 0x7] = rate;
         self.last_count += 1;
 
@@ -195,9 +195,16 @@ impl Status {
             eprint!("\x1b[1;1H\x1b[2K\x1b[44;37m ZorpInvader \u{2502} Status: {} \u{2502} Keys: {}/{}/{} \x1b[0m\n",
                 status_str, valid, keys_found, html_sites);
 
-            // Row 2: Rate, progress, ETA, found ports
-            eprint!("\x1b[2;1H\x1b[2K \x1b[32mRate:\x1b[0m {:6.2} kpps \u{2502} \x1b[36mProgress:\x1b[0m {:5.2}% \u{2502} \x1b[33mETA:\x1b[0m {:02}:{:02}:{:02} \u{2502} \x1b[31mFound:\x1b[0m {}\n",
-                kpps, percent_done, hours, minutes, seconds, total_synacks);
+            // Row 2: Rate, position/total, ETA, found ports
+            let rate_str = if pps <= 0.0 {
+                format!("{:6.2} kpps", kpps)
+            } else if pps >= 1_000_000.0 {
+                format!("{:.2} Mpps", pps / 1_000_000.0)
+            } else {
+                format!("{:.2} kpps", kpps)
+            };
+            eprint!("\x1b[2;1H\x1b[2K \x1b[32mRate:\x1b[0m {} \u{2502} \x1b[36mProgress:\x1b[0m {}/{} ({:.1}%) \u{2502} \x1b[33mETA:\x1b[0m {:02}:{:02}:{:02} \u{2502} \x1b[31mFound:\x1b[0m {}\n",
+                rate_str, count, max_count, percent_done, hours, minutes, seconds, total_synacks);
 
             // Row 3: Separator
             eprint!("\x1b[3;1H\x1b[2K\x1b[37m{}\x1b[0m\n", sep);

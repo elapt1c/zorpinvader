@@ -86,7 +86,12 @@ fn transmit_thread(parms: Arc<ThreadPair>) {
     parms.total_syns.store(0, Ordering::SeqCst);
 
     let mut throttler = Throttler::new();
-    throttler.start(zorp.max_rate / nic_count as f64);
+    let effective_rate = if zorp.max_rate <= 0.0 {
+        f64::INFINITY
+    } else {
+        zorp.max_rate / nic_count as f64
+    };
+    throttler.start(effective_rate);
 
     let mut targets = zorpinvader::massip::massip::MassIP::new();
     for range_str in &zorp.target_ranges {
@@ -163,7 +168,8 @@ fn transmit_thread(parms: Arc<ThreadPair>) {
                 continue;
             }
 
-            let batch_size = throttler.next_batch(0);
+            let syns_sent = parms.total_syns.load(Ordering::Relaxed);
+            let batch_size = throttler.next_batch(syns_sent);
             let mut remaining = batch_size;
 
             while remaining > 0 && current < range {

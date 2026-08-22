@@ -524,7 +524,7 @@ impl Zorp {
         zorp.output.is_show_open = true;
         zorp.is_capture_cert = true;
         zorp.blackrock_rounds = 14;
-        zorp.max_rate = 100.0;
+        zorp.max_rate = 0.0; // uncapped by default
         zorp.wait = 10;
         zorp.min_packet_size = 60;
         zorp
