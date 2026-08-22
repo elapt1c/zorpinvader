@@ -144,88 +144,106 @@ fn transmit_thread(parms: Arc<ThreadPair>) {
     let shard_start = (zorp.shard.one as u64 - 1) * nic_count + parms.nic_index as u64;
     let step = stride * nic_count * zorp.shard.of as u64;
 
-    // Resume from saved position if available.
-    let mut current = if zorp.resume.index > 0 {
-        zorp.resume.index
+    // Resume: decode saved position into (pass, current).
+    // The saved index encodes both the pass number and the current position.
+    // pass = saved_index / base_range, current = saved_index % base_range.
+    let mut pass: u64 = if zorp.resume.index > 0 {
+        zorp.resume.index / base_range
+    } else {
+        0
+    };
+    let mut current: u64 = if zorp.resume.index > 0 {
+        zorp.resume.index % base_range
     } else {
         shard_start
     };
 
     let mut last_save = std::time::Instant::now();
 
-    log::info!("[+] transmit thread #{}: stride={}, start={}", parms.nic_index, stride, current);
+    log::info!("[+] transmit thread #{}: stride={}, start_pass={}", parms.nic_index, stride, pass);
 
     'infinite: loop {
         let range = base_range;
         let range_ipv6 = count_ipv6 * count_ports;
         let blackrock = BlackRock::init(range, seed, zorp.blackrock_rounds);
 
-        while current < range {
-            // Throttle SYN scan if fetcher queue is backing up
-            let qdepth = parms.fetcher.queue_depth();
-            if qdepth > 4096 {
-                std::thread::sleep(Duration::from_millis(200));
-                continue;
+        // Outer loop: one pass per offset. Each pass sweeps ~range/step indices.
+        // After stride passes, every index has been visited exactly once.
+        while pass < stride {
+            // Start this pass at the offset for this pass
+            let pass_start = pass + shard_start;
+            if pass_start >= stride {
+                break; // all passes complete
             }
+            current = pass_start;
 
-            let syns_sent = parms.total_syns.load(Ordering::Relaxed);
-            let batch_size = throttler.next_batch(syns_sent);
-            let mut remaining = batch_size;
-
-            while remaining > 0 && current < range {
-                let xx = blackrock.shuffle(current);
-
-                if xx < range_ipv6 {
-                    // Skip IPv6 for now
-                } else {
-                    let xx = xx - range_ipv6;
-                    let ip_them = targets.ipv4.pick(xx % count_ipv4);
-                    let port_them = targets.ports.pick(xx / count_ipv4);
-
-                    let cookie = syn_cookie::syn_cookie_ipv4(
-                        ip_them, port_them, ip_me, port_me as u32, entropy,
-                    );
-                    let seqno = cookie as u32;
-
-                    let len = pkt::template_set_target_ipv4(
-                        tmplset, ip_them, port_them, ip_me, port_me, seqno, &mut px,
-                    );
-
-                    if len > 0 {
-                        let _ = adapter.send_packet(&px[..len]);
-                    }
-
-                    parms.total_syns.fetch_add(1, Ordering::SeqCst);
+            // Inner loop: stride through the index space
+            while current < range {
+                // Throttle SYN scan if fetcher queue is backing up
+                let qdepth = parms.fetcher.queue_depth();
+                if qdepth > 4096 {
+                    std::thread::sleep(Duration::from_millis(200));
+                    continue;
                 }
 
-                remaining -= 1;
+                let syns_sent = parms.total_syns.load(Ordering::Relaxed);
+                let batch_size = throttler.next_batch(syns_sent);
+                let mut remaining = batch_size;
 
-                // Advance by stride (spirograph step)
-                current += step;
-                if current >= range {
-                    // Completed a full sweep — advance offset and wrap
-                    let offset = (current % stride) + shard_start;
-                    if offset < stride {
-                        current = offset;
+                while remaining > 0 && current < range {
+                    let xx = blackrock.shuffle(current);
+
+                    if xx < range_ipv6 {
+                        // Skip IPv6 for now
                     } else {
-                        // All offsets covered — full scan complete
-                        current = range;
+                        let xx = xx - range_ipv6;
+                        let ip_them = targets.ipv4.pick(xx % count_ipv4);
+                        let port_them = targets.ports.pick(xx / count_ipv4);
+
+                        let cookie = syn_cookie::syn_cookie_ipv4(
+                            ip_them, port_them, ip_me, port_me as u32, entropy,
+                        );
+                        let seqno = cookie as u32;
+
+                        let len = pkt::template_set_target_ipv4(
+                            tmplset, ip_them, port_them, ip_me, port_me, seqno, &mut px,
+                        );
+
+                        if len > 0 {
+                            let _ = adapter.send_packet(&px[..len]);
+                        }
+
+                        parms.total_syns.fetch_add(1, Ordering::SeqCst);
                     }
+
+                    remaining -= 1;
+
+                    // Advance by stride (spirograph step)
+                    current += step;
+                }
+
+                // Encode progress as (pass * range + current) for save/resume
+                let progress = pass * range + current.min(range - 1);
+                parms.my_index.store(progress, Ordering::SeqCst);
+
+                // Periodic save every 60 seconds
+                if last_save.elapsed() >= Duration::from_secs(60) {
+                    if let Err(e) = zorp.save_state(progress) {
+                        log::warn!("[save] failed: {}", e);
+                    } else {
+                        log::info!("[save] progress saved (pass={}, index={})", pass, progress);
+                    }
+                    last_save = std::time::Instant::now();
+                }
+
+                if globals::is_tx_done() {
+                    break;
                 }
             }
 
-            parms.my_index.store(current, Ordering::SeqCst);
-
-            // Periodic save every 60 seconds
-            if last_save.elapsed() >= Duration::from_secs(60) {
-                parms.my_index.store(current, Ordering::SeqCst);
-                if let Err(e) = zorp.save_state(current) {
-                    log::warn!("[save] failed: {}", e);
-                } else {
-                    log::info!("[save] progress saved (index={})", current);
-                }
-                last_save = std::time::Instant::now();
-            }
+            // This pass is done — advance to next offset
+            pass += 1;
+            log::info!("[+] pass {}/{} complete", pass, stride);
 
             if globals::is_tx_done() {
                 break;
@@ -233,15 +251,16 @@ fn transmit_thread(parms: Arc<ThreadPair>) {
         }
 
         if zorp.is_infinite && !globals::is_tx_done() {
-            current = shard_start; // restart from beginning
+            pass = 0; // restart spirograph from beginning
             continue 'infinite;
         }
         break;
     }
 
     // Final save on completion
-    let _ = zorp.save_state(current);
-    log::info!("[save] final state saved (index={})", current);
+    let progress = pass * base_range + current.min(base_range.saturating_sub(1));
+    let _ = zorp.save_state(progress);
+    log::info!("[save] final state saved (pass={}, progress={})", pass, progress);
 
     log::info!("[+] transmit thread #{} complete", parms.nic_index);
 
@@ -609,6 +628,10 @@ fn main_scan(zorp: Arc<Zorp>) -> i32 {
     status.start();
 
     // --- Status monitoring loop ---
+    // Recompute stride for progress decoding (must match transmit thread).
+    let mut stride = if zorp.stride > 0 { zorp.stride } else { (range / 64).max(1) };
+    if stride % 2 == 0 { stride |= 1; }
+
     let mut last_syns: u64 = 0;
     let mut last_time = std::time::Instant::now();
 
@@ -628,11 +651,16 @@ fn main_scan(zorp: Arc<Zorp>) -> i32 {
         last_syns = total_syns;
         last_time = now;
 
-        if (total_syns >= range || idx >= range) && total_syns > 0 && !zorp.is_infinite {
+        // idx encodes (pass * range + current_position).
+        // Scan is complete when all stride passes are done.
+        let current_pass = if range > 0 { idx / range } else { 0 };
+        let pass_progress = if range > 0 { idx % range } else { 0 };
+        if current_pass >= stride && total_syns > 0 && !zorp.is_infinite {
             globals::set_tx_done(true);
         }
 
-        let display_idx = if total_syns == 0 { 0 } else { idx };
+        // Display pass_progress within current pass, with pass count in the Found field
+        let display_idx = if total_syns == 0 { 0 } else { pass_progress };
         status.print(
             display_idx, range, actual_rate, 0, total_synacks, total_syns, 0,
             zorp.output.is_status_ndjson,
