@@ -664,6 +664,8 @@ fn main_scan(zorp: Arc<Zorp>) -> i32 {
         // Pass position from dedicated atomic (avoids clamping artifacts)
         let pass_pos = parms.pass_pos.load(Ordering::SeqCst);
 
+        // Total packets for one full spirograph cycle = range
+        // (stride passes × range/stride indices per pass = range unique indices visited)
         let ips_checked = if count_ports > 0 { total_syns / count_ports } else { total_syns };
         status.print(
             ips_checked, count_ips, actual_rate, 0, total_synacks, total_syns, 0,

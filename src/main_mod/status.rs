@@ -142,7 +142,7 @@ impl Status {
         pass_pos: u64,
         pass_range: u64,
     ) {
-        let _ = (total_tcbs, total_syns, exiting);
+        let _ = (total_tcbs, exiting);
 
         globals::update_global_now();
 
@@ -159,9 +159,10 @@ impl Status {
 
         let kpps = pps / 1000.0;
 
-        // Cycle %: position within current pass (resets each cycle)
+        // Cycle %: total packets sent / total packets for one full spirograph cycle
+        // pass_range = range (stride passes × range/stride indices per pass = range unique indices)
         let cycle_pct = if pass_range > 0 {
-            (pass_pos as f64 * 100.0) / pass_range as f64
+            (total_syns as f64 * 100.0) / pass_range as f64
         } else {
             0.0
         };
@@ -173,16 +174,15 @@ impl Status {
             0.0
         };
 
-        // ETA: wall-clock based (elapsed / total_pct * remaining_pct)
-        let wall_elapsed = self.scan_start.elapsed().as_secs_f64();
-        let time_remaining = if total_pct > 0.5 {
-            wall_elapsed / (total_pct / 100.0) * (1.0 - total_pct / 100.0)
+        // ETA: rate-based (remaining packets / current send rate)
+        let time_remaining = if pps > 1.0 && total_syns > 0 && pass_range > total_syns {
+            pass_range.saturating_sub(total_syns) as f64 / pps
         } else {
             0.0
         };
-        let hours = (time_remaining / 3600.0) as u32;
-        let minutes = ((time_remaining / 60.0) as u32) % 60;
-        let seconds = (time_remaining as u32) % 60;
+        let hours = ((time_remaining / 3600.0) as u64).min(99) as u32;
+        let minutes = ((time_remaining / 60.0) as u64 % 60) as u32;
+        let seconds = (time_remaining as u64 % 60) as u32;
 
         // Gather real stats from pipeline components
         let stats = scanner.stats();
@@ -195,7 +195,7 @@ impl Status {
 
         if json_status {
             eprintln!(
-                r#"{{"status":"{}","rate_kpps":{:.2},"cycle_pct":{:.1},"total_pct":{:.4},"eta":"{:02}:{:02}:{:02}","found":{},"keys_valid":{},"keys_detected":{},"html_sites":{},"fetcher_pages":{},"fetcher_scripts":{},"fetcher_queue":{}}}"#,
+                r#"{{"status":"{}","rate_kpps":{:.2},"cycle_pct":{:.2},"total_pct":{:.4},"eta":"{:02}:{:02}:{:02}","found":{},"keys_valid":{},"keys_detected":{},"html_sites":{},"fetcher_pages":{},"fetcher_scripts":{},"fetcher_queue":{}}}"#,
                 if globals::is_tx_done() { "Waiting" } else { "Scanning" },
                 kpps,
                 cycle_pct,
@@ -222,7 +222,7 @@ impl Status {
             } else {
                 format!("{:.2} kpps", kpps)
             };
-            eprint!("\x1b[2;1H\x1b[2K \x1b[32mRate:\x1b[0m {} \u{2502} \x1b[36mProgress:\x1b[0m {:.0}%/{:.2}% \u{2502} \x1b[33mETA:\x1b[0m {:02}:{:02}:{:02} \u{2502} \x1b[31mFound:\x1b[0m {}\n",
+            eprint!("\x1b[2;1H\x1b[2K \x1b[32mRate:\x1b[0m {} \u{2502} \x1b[36mProgress:\x1b[0m {:.2}%/{:.2}% \u{2502} \x1b[33mETA:\x1b[0m {:02}:{:02}:{:02} \u{2502} \x1b[31mFound:\x1b[0m {}\n",
                 rate_str, cycle_pct, total_pct, hours, minutes, seconds, total_synacks);
 
             // Row 3: Separator
