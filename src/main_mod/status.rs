@@ -23,6 +23,9 @@ pub struct Status {
     /// Last measurement point
     pub last: LastStatus,
 
+    /// Wall-clock scan start time
+    pub scan_start: Instant,
+
     /// Timer counter
     pub timer: u64,
 
@@ -76,6 +79,7 @@ impl Status {
                 time: 0,
                 count: 0,
             },
+            scan_start: Instant::now(),
             timer: 1,
             char_count: 0,
             last_rates: [0.0; 8],
@@ -100,6 +104,7 @@ impl Status {
         self.timer = 1;
         self.last_rates = [0.0; 8];
         self.last_count = 0;
+        self.scan_start = Instant::now();
 
         // Clear screen
         eprint!("\x1b[2J");
@@ -134,8 +139,8 @@ impl Status {
         scanner: &GreyhatScanner,
         fetcher: &Fetcher,
         verifier: &Verifier,
-        current_pass: u64,
-        stride: u64,
+        pass_pos: u64,
+        pass_range: u64,
     ) {
         let _ = (total_tcbs, total_syns, exiting);
 
@@ -152,18 +157,26 @@ impl Status {
         self.last_rates[self.last_count & 0x7] = rate;
         self.last_count += 1;
 
-        let avg_rate: f64 = self.last_rates.iter().sum::<f64>() / 8.0;
         let kpps = pps / 1000.0;
-        let total_indices = stride.saturating_mul(max_count);
-        let total_done = current_pass.saturating_mul(max_count) + count;
-        let percent_done = if max_count > 0 {
+
+        // Cycle %: position within current pass (resets each cycle)
+        let cycle_pct = if pass_range > 0 {
+            (pass_pos as f64 * 100.0) / pass_range as f64
+        } else {
+            0.0
+        };
+
+        // Total %: unique IPs checked / total possible IPs
+        let total_pct = if max_count > 0 {
             (count as f64 * 100.0) / max_count as f64
         } else {
             0.0
         };
-        let time_remaining = if avg_rate > 0.0 && total_indices > 0 {
-            let remaining = total_indices.saturating_sub(total_done) as f64;
-            remaining / avg_rate
+
+        // ETA: wall-clock based (elapsed / total_pct * remaining_pct)
+        let wall_elapsed = self.scan_start.elapsed().as_secs_f64();
+        let time_remaining = if total_pct > 0.5 {
+            wall_elapsed / (total_pct / 100.0) * (1.0 - total_pct / 100.0)
         } else {
             0.0
         };
@@ -182,10 +195,11 @@ impl Status {
 
         if json_status {
             eprintln!(
-                r#"{{"status":"{}","rate_kpps":{:.2},"progress_pct":{:.2},"eta":"{:02}:{:02}:{:02}","found":{},"keys_valid":{},"keys_detected":{},"html_sites":{},"fetcher_pages":{},"fetcher_scripts":{},"fetcher_queue":{}}}"#,
+                r#"{{"status":"{}","rate_kpps":{:.2},"cycle_pct":{:.1},"total_pct":{:.4},"eta":"{:02}:{:02}:{:02}","found":{},"keys_valid":{},"keys_detected":{},"html_sites":{},"fetcher_pages":{},"fetcher_scripts":{},"fetcher_queue":{}}}"#,
                 if globals::is_tx_done() { "Waiting" } else { "Scanning" },
                 kpps,
-                percent_done,
+                cycle_pct,
+                total_pct,
                 hours, minutes, seconds,
                 total_synacks,
                 valid, keys_found, html_sites,
@@ -208,14 +222,8 @@ impl Status {
             } else {
                 format!("{:.2} kpps", kpps)
             };
-            let position_pct = percent_done;
-            let total_pct = if total_indices > 0 {
-                (total_done as f64 * 100.0) / total_indices as f64
-            } else {
-                0.0
-            };
-            eprint!("\x1b[2;1H\x1b[2K \x1b[32mRate:\x1b[0m {} \u{2502} \x1b[36mProgress:\x1b[0m {:.0}%/{:.0}% \u{2502} \x1b[33mETA:\x1b[0m {:02}:{:02}:{:02} \u{2502} \x1b[31mFound:\x1b[0m {}\n",
-                rate_str, position_pct, total_pct, hours, minutes, seconds, total_synacks);
+            eprint!("\x1b[2;1H\x1b[2K \x1b[32mRate:\x1b[0m {} \u{2502} \x1b[36mProgress:\x1b[0m {:.0}%/{:.2}% \u{2502} \x1b[33mETA:\x1b[0m {:02}:{:02}:{:02} \u{2502} \x1b[31mFound:\x1b[0m {}\n",
+                rate_str, cycle_pct, total_pct, hours, minutes, seconds, total_synacks);
 
             // Row 3: Separator
             eprint!("\x1b[3;1H\x1b[2K\x1b[37m{}\x1b[0m\n", sep);

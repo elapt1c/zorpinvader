@@ -37,6 +37,7 @@ struct ThreadPair {
     done_transmitting: AtomicBool,
     done_receiving: AtomicBool,
     my_index: AtomicU64,
+    pass_pos: AtomicU64,
     throttler: parking_lot::Mutex<Throttler>,
     total_synacks: AtomicU64,
     total_tcbs: AtomicU64,
@@ -225,6 +226,7 @@ fn transmit_thread(parms: Arc<ThreadPair>) {
                 // Encode progress as (pass * range + current) for save/resume
                 let progress = pass * range + current.min(range - 1);
                 parms.my_index.store(progress, Ordering::SeqCst);
+                parms.pass_pos.store(current % range, Ordering::SeqCst);
 
                 // Periodic save every 60 seconds
                 if last_save.elapsed() >= Duration::from_secs(60) {
@@ -591,6 +593,7 @@ fn main_scan(zorp: Arc<Zorp>) -> i32 {
         done_transmitting: AtomicBool::new(false),
         done_receiving: AtomicBool::new(false),
         my_index: AtomicU64::new(zorp.resume.index),
+        pass_pos: AtomicU64::new(0),
         throttler: parking_lot::Mutex::new(Throttler::new()),
         total_synacks: AtomicU64::new(0),
         total_tcbs: AtomicU64::new(0),
@@ -654,18 +657,19 @@ fn main_scan(zorp: Arc<Zorp>) -> i32 {
         // idx encodes (pass * range + current_position).
         // Scan is complete when all stride passes are done.
         let current_pass = if range > 0 { idx / range } else { 0 };
-        let pass_progress = if range > 0 { idx % range } else { 0 };
         if current_pass >= stride && total_syns > 0 && !zorp.is_infinite {
             globals::set_tx_done(true);
         }
 
-        // Display pass_progress within current pass, with pass count in the Found field
-        let display_idx = if total_syns == 0 { 0 } else { pass_progress };
+        // Pass position from dedicated atomic (avoids clamping artifacts)
+        let pass_pos = parms.pass_pos.load(Ordering::SeqCst);
+
+        let ips_checked = if count_ports > 0 { total_syns / count_ports } else { total_syns };
         status.print(
-            display_idx, range, actual_rate, 0, total_synacks, total_syns, 0,
+            ips_checked, count_ips, actual_rate, 0, total_synacks, total_syns, 0,
             zorp.output.is_status_ndjson,
             &scanner, &fetcher, &verifier,
-            current_pass, stride,
+            pass_pos, range,
         );
 
         // --- Shutdown: keep status updating while threads exit and pipeline drains ---
