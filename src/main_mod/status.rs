@@ -134,6 +134,8 @@ impl Status {
         scanner: &GreyhatScanner,
         fetcher: &Fetcher,
         verifier: &Verifier,
+        current_pass: u64,
+        stride: u64,
     ) {
         let _ = (total_tcbs, total_syns, exiting);
 
@@ -152,13 +154,16 @@ impl Status {
 
         let avg_rate: f64 = self.last_rates.iter().sum::<f64>() / 8.0;
         let kpps = pps / 1000.0;
+        let total_indices = stride.saturating_mul(max_count);
+        let total_done = current_pass.saturating_mul(max_count) + count;
         let percent_done = if max_count > 0 {
             (count as f64 * 100.0) / max_count as f64
         } else {
             0.0
         };
-        let time_remaining = if avg_rate > 0.0 {
-            (1.0 - percent_done / 100.0) * (max_count as f64 / avg_rate)
+        let time_remaining = if avg_rate > 0.0 && total_indices > 0 {
+            let remaining = total_indices.saturating_sub(total_done) as f64;
+            remaining / avg_rate
         } else {
             0.0
         };
@@ -203,8 +208,14 @@ impl Status {
             } else {
                 format!("{:.2} kpps", kpps)
             };
-            eprint!("\x1b[2;1H\x1b[2K \x1b[32mRate:\x1b[0m {} \u{2502} \x1b[36mProgress:\x1b[0m {}/{} ({:.1}%) \u{2502} \x1b[33mETA:\x1b[0m {:02}:{:02}:{:02} \u{2502} \x1b[31mFound:\x1b[0m {}\n",
-                rate_str, count, max_count, percent_done, hours, minutes, seconds, total_synacks);
+            let position_pct = percent_done;
+            let total_pct = if total_indices > 0 {
+                (total_done as f64 * 100.0) / total_indices as f64
+            } else {
+                0.0
+            };
+            eprint!("\x1b[2;1H\x1b[2K \x1b[32mRate:\x1b[0m {} \u{2502} \x1b[36mProgress:\x1b[0m {:.0}%/{:.0}% \u{2502} \x1b[33mETA:\x1b[0m {:02}:{:02}:{:02} \u{2502} \x1b[31mFound:\x1b[0m {}\n",
+                rate_str, position_pct, total_pct, hours, minutes, seconds, total_synacks);
 
             // Row 3: Separator
             eprint!("\x1b[3;1H\x1b[2K\x1b[37m{}\x1b[0m\n", sep);

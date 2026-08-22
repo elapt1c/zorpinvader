@@ -1233,7 +1233,7 @@ link-local, and loopback ranges. Default ports: 80, 8080, 8443, 8000,
 Found keys are written to found_keys.csv with real-time TUI feedback.
 
 Common options:
-    --rate <packets/s>   Scan speed (default: 100)
+    --rate <packets/s>   Scan speed (default: uncapped)
     --tpc <n>            Fetcher threads per core (default: 16, max: 32)
     --include-safe       Also detect "safe" keys (Stripe publishable, customer IDs)
     --stride <n>         Index stride for spirograph coverage (default: range/64)

@@ -17,21 +17,19 @@ cargo build --release 2>&1 | grep -v "^warning:" | grep -v "^   = note:" | grep 
 echo "[3/4] Stripping any remaining debug info..."
 strip -s target/release/zorpinvader 2>/dev/null || true
 
-echo "[4/4] Deploying to bin/..."
-mkdir -p bin
+echo "[4/4] Deploying binary..."
 # Handle "text file busy" if binary is currently running
-if [ -f bin/zorpinvader ]; then
-    rm -f bin/zorpinvader 2>/dev/null || true
+if [ -f zorpinvader ]; then
+    rm -f zorpinvader 2>/dev/null || true
 fi
-cp target/release/zorpinvader bin/zorpinvader.tmp
-mv bin/zorpinvader.tmp bin/zorpinvader
-chmod +x bin/zorpinvader
+cp target/release/zorpinvader zorpinvader.tmp
+mv zorpinvader.tmp zorpinvader
+chmod +x zorpinvader
 
 echo ""
 echo "=== Build complete ==="
-ls -lh bin/zorpinvader
+ls -lh zorpinvader
 echo ""
-file bin/zorpinvader
+file zorpinvader
 echo ""
-echo "Run with: sudo ./run.sh [rate] [threads-per-core] [ports]"
-echo "Example:  sudo ./run.sh 10000 16 \"80,8080,8443\""
+echo "Run with: sudo ./zorpinvader [--rate 5000]"

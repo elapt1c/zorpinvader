@@ -665,6 +665,7 @@ fn main_scan(zorp: Arc<Zorp>) -> i32 {
             display_idx, range, actual_rate, 0, total_synacks, total_syns, 0,
             zorp.output.is_status_ndjson,
             &scanner, &fetcher, &verifier,
+            current_pass, stride,
         );
 
         // --- Shutdown: keep status updating while threads exit and pipeline drains ---
@@ -767,7 +768,7 @@ fn main() {
 
     // Apply defaults so the transmit thread has targets even when
     // no --range/--ports are specified on the command line.
-    if zorp.op == Operation::Scan {
+    if zorp.op == Operation::Scan || zorp.op == Operation::Default {
         if zorp.target_ranges.is_empty() {
             zorp.target_ranges.push("0.0.0.0/0".to_string());
             // Default excludes: RFC1918, CGNAT, link-local, loopback, multicast, reserved
@@ -797,10 +798,7 @@ fn main() {
     let zorp = Arc::new(zorp);
 
     match zorp.op {
-        Operation::Default => {
-            Zorp::print_help();
-        }
-        Operation::Scan => {
+        Operation::Default | Operation::Scan => {
             std::process::exit(main_scan(zorp));
         }
         Operation::ListAdapters => {
