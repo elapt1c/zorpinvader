@@ -502,7 +502,7 @@ fn main_scan(zorp: Arc<Zorp>) -> i32 {
     eprintln!("[+] source port: {}, entropy: 0x{:016x}", source_port, entropy);
 
     // --- Build the greyhat API key scanning pipeline ---
-    let scanner = Arc::new(GreyhatScanner::new());
+    let scanner = Arc::new(GreyhatScanner::new(zorp.include_safe));
     let verifier = Arc::new(Verifier::new(0));
     let fetcher = Arc::new(Fetcher::new(
         scanner.clone(),
@@ -510,8 +510,12 @@ fn main_scan(zorp: Arc<Zorp>) -> i32 {
         Some(zorp.tpc),
     ));
 
-    eprintln!("[+] API key scanner: {} patterns, results → found_keys.csv",
-        zorpinvader::greyhat::greyhat::KEY_PATTERNS.len());
+    let total_patterns = zorpinvader::greyhat::greyhat::KEY_PATTERNS.len();
+    let safe_count = zorpinvader::greyhat::greyhat::KEY_PATTERNS.iter().filter(|p| p.safe).count();
+    let active_patterns = if zorp.include_safe { total_patterns } else { total_patterns - safe_count };
+    eprintln!("[+] API key scanner: {} patterns active ({} safe excluded), results → found_keys.csv{}",
+        active_patterns, safe_count,
+        if zorp.include_safe { " (--include-safe)" } else { "" });
 
     // --- Create thread pair ---
     let parms = Arc::new(ThreadPair {

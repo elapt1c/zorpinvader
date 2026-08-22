@@ -431,6 +431,10 @@ pub struct Zorp {
 
     /// Threads per core for fetcher/worker pools
     pub tpc: usize,
+
+    /// Include "safe" key patterns (e.g. Stripe publishable keys) that are
+    /// designed to be public/client-side. Disabled by default.
+    pub include_safe: bool,
 }
 
 impl Default for Zorp {
@@ -496,6 +500,7 @@ impl Default for Zorp {
             vuln_name: None,
             config_files: Vec::new(),
             tpc: 16,
+            include_safe: false,
         }
     }
 }
@@ -1071,6 +1076,10 @@ impl Zorp {
                 self.tpc = self.tpc.clamp(1, 32);
             }
 
+            "include-safe" => {
+                self.include_safe = Self::parse_boolean(value);
+            }
+
             // Silently ignore some parameters
             "randomize-hosts" | "send-eth" | "nobacktrace" | "backtrace" => {}
 
@@ -1206,6 +1215,7 @@ Found keys are written to found_keys.csv with real-time TUI feedback.
 Common options:
     --rate <packets/s>   Scan speed (default: 100)
     --tpc <n>            Fetcher threads per core (default: 16, max: 32)
+    --include-safe       Also detect "safe" keys (Stripe publishable, customer IDs)
     --banners            Enable banner/API key scanning (required)
     --adapter-ip <ip>    Set source IP manually
     --adapter-mac <mac>  Set source MAC manually

@@ -33,6 +33,10 @@ pub struct KeyPattern {
     pub provider: &'static str,
     /// Machine-readable category tag (e.g. `"aws"`, `"github"`).
     pub category: &'static str,
+    /// Whether this key type is designed to be public/client-side.
+    /// Safe keys (e.g. Stripe publishable keys) are only detected when
+    /// `--include-safe` is passed.
+    pub safe: bool,
 }
 
 /// The complete registry of known API key prefixes.
@@ -41,92 +45,94 @@ pub struct KeyPattern {
 /// human-readable provider description, and a short category tag.
 pub static KEY_PATTERNS: &[KeyPattern] = &[
     // AWS
-    KeyPattern { prefix: "AKIA", min_len: 16, max_len: 25, provider: "AWS Access Key ID", category: "aws" },
-    KeyPattern { prefix: "ASIA", min_len: 16, max_len: 25, provider: "AWS Temporary Access Key", category: "aws" },
+    KeyPattern { prefix: "AKIA", min_len: 16, max_len: 25, provider: "AWS Access Key ID", category: "aws", safe: false },
+    KeyPattern { prefix: "ASIA", min_len: 16, max_len: 25, provider: "AWS Temporary Access Key", category: "aws", safe: false },
     // Google
-    KeyPattern { prefix: "AIzaSy", min_len: 16, max_len: 60, provider: "Google API Key", category: "google" },
-    KeyPattern { prefix: "ya29.", min_len: 20, max_len: 500, provider: "Google OAuth2 Token", category: "google" },
+    KeyPattern { prefix: "AIzaSy", min_len: 16, max_len: 60, provider: "Google API Key", category: "google", safe: false },
+    KeyPattern { prefix: "ya29.", min_len: 20, max_len: 500, provider: "Google OAuth2 Token", category: "google", safe: false },
     // GitHub
-    KeyPattern { prefix: "ghp_", min_len: 16, max_len: 100, provider: "GitHub Personal Access Token", category: "github" },
-    KeyPattern { prefix: "gho_", min_len: 16, max_len: 100, provider: "GitHub OAuth Token", category: "github" },
-    KeyPattern { prefix: "ghu_", min_len: 16, max_len: 100, provider: "GitHub User-to-Server Token", category: "github" },
-    KeyPattern { prefix: "ghs_", min_len: 16, max_len: 100, provider: "GitHub Server-to-Server Token", category: "github" },
-    KeyPattern { prefix: "github_pat_", min_len: 16, max_len: 200, provider: "GitHub Fine-Grained PAT", category: "github" },
+    KeyPattern { prefix: "ghp_", min_len: 16, max_len: 100, provider: "GitHub Personal Access Token", category: "github", safe: false },
+    KeyPattern { prefix: "gho_", min_len: 16, max_len: 100, provider: "GitHub OAuth Token", category: "github", safe: false },
+    KeyPattern { prefix: "ghu_", min_len: 16, max_len: 100, provider: "GitHub User-to-Server Token", category: "github", safe: false },
+    KeyPattern { prefix: "ghs_", min_len: 16, max_len: 100, provider: "GitHub Server-to-Server Token", category: "github", safe: false },
+    KeyPattern { prefix: "github_pat_", min_len: 16, max_len: 200, provider: "GitHub Fine-Grained PAT", category: "github", safe: false },
     // Stripe
-    KeyPattern { prefix: "sk_live_", min_len: 16, max_len: 100, provider: "Stripe Secret Key (Live)", category: "stripe" },
-    KeyPattern { prefix: "sk_test_", min_len: 16, max_len: 100, provider: "Stripe Secret Key (Test)", category: "stripe" },
-    KeyPattern { prefix: "pk_live_", min_len: 16, max_len: 100, provider: "Stripe Publishable Key (Live)", category: "stripe" },
-    KeyPattern { prefix: "rk_live_", min_len: 16, max_len: 100, provider: "Stripe Restricted Key (Live)", category: "stripe" },
-    KeyPattern { prefix: "rk_test_", min_len: 16, max_len: 100, provider: "Stripe Restricted Key (Test)", category: "stripe" },
-    KeyPattern { prefix: "whsec_", min_len: 16, max_len: 80, provider: "Stripe Webhook Secret", category: "stripe" },
-    KeyPattern { prefix: "cus_", min_len: 16, max_len: 80, provider: "Stripe Customer ID", category: "stripe" },
+    KeyPattern { prefix: "sk_live_", min_len: 16, max_len: 100, provider: "Stripe Secret Key (Live)", category: "stripe", safe: false },
+    KeyPattern { prefix: "sk_test_", min_len: 16, max_len: 100, provider: "Stripe Secret Key (Test)", category: "stripe", safe: false },
+    KeyPattern { prefix: "pk_live_", min_len: 16, max_len: 100, provider: "Stripe Publishable Key (Live)", category: "stripe", safe: true },
+    KeyPattern { prefix: "rk_live_", min_len: 16, max_len: 100, provider: "Stripe Restricted Key (Live)", category: "stripe", safe: false },
+    KeyPattern { prefix: "rk_test_", min_len: 16, max_len: 100, provider: "Stripe Restricted Key (Test)", category: "stripe", safe: false },
+    KeyPattern { prefix: "whsec_", min_len: 16, max_len: 80, provider: "Stripe Webhook Secret", category: "stripe", safe: false },
+    KeyPattern { prefix: "cus_", min_len: 16, max_len: 80, provider: "Stripe Customer ID", category: "stripe", safe: true },
     // CircleCI
-    KeyPattern { prefix: "cci_", min_len: 16, max_len: 80, provider: "CircleCI API Token", category: "circleci" },
+    KeyPattern { prefix: "cci_", min_len: 16, max_len: 80, provider: "CircleCI API Token", category: "circleci", safe: false },
     // Twitter / X
-    KeyPattern { prefix: "AAAAAAAA", min_len: 20, max_len: 200, provider: "Twitter Bearer Token", category: "twitter" },
+    KeyPattern { prefix: "AAAAAAAA", min_len: 20, max_len: 200, provider: "Twitter Bearer Token", category: "twitter", safe: false },
     // Groq
-    KeyPattern { prefix: "gsk_", min_len: 16, max_len: 80, provider: "Groq API Key", category: "groq" },
+    KeyPattern { prefix: "gsk_", min_len: 16, max_len: 80, provider: "Groq API Key", category: "groq", safe: false },
     // DigitalOcean
-    KeyPattern { prefix: "dop_v1_", min_len: 30, max_len: 150, provider: "DigitalOcean API Token", category: "digitalocean" },
-    KeyPattern { prefix: "doa_", min_len: 16, max_len: 150, provider: "DigitalOcean OAuth Token", category: "digitalocean" },
+    KeyPattern { prefix: "dop_v1_", min_len: 30, max_len: 150, provider: "DigitalOcean API Token", category: "digitalocean", safe: false },
+    KeyPattern { prefix: "doa_", min_len: 16, max_len: 150, provider: "DigitalOcean OAuth Token", category: "digitalocean", safe: false },
     // GitLab
-    KeyPattern { prefix: "glpat-", min_len: 16, max_len: 80, provider: "GitLab Personal Access Token", category: "gitlab" },
-    KeyPattern { prefix: "glft-", min_len: 16, max_len: 80, provider: "GitLab Feed Token", category: "gitlab" },
-    KeyPattern { prefix: "GR1348941", min_len: 16, max_len: 80, provider: "GitLab Runner Token", category: "gitlab" },
+    KeyPattern { prefix: "glpat-", min_len: 16, max_len: 80, provider: "GitLab Personal Access Token", category: "gitlab", safe: false },
+    KeyPattern { prefix: "glft-", min_len: 16, max_len: 80, provider: "GitLab Feed Token", category: "gitlab", safe: false },
+    KeyPattern { prefix: "GR1348941", min_len: 16, max_len: 80, provider: "GitLab Runner Token", category: "gitlab", safe: false },
     // SendGrid
-    KeyPattern { prefix: "SG.", min_len: 16, max_len: 120, provider: "SendGrid API Key", category: "sendgrid" },
+    KeyPattern { prefix: "SG.", min_len: 16, max_len: 120, provider: "SendGrid API Key", category: "sendgrid", safe: false },
     // Fastly
-    KeyPattern { prefix: "FASTLY_", min_len: 16, max_len: 80, provider: "Fastly API Token", category: "fastly" },
+    KeyPattern { prefix: "FASTLY_", min_len: 16, max_len: 80, provider: "Fastly API Token", category: "fastly", safe: false },
     // Cohere
-    KeyPattern { prefix: "cohere-", min_len: 16, max_len: 80, provider: "Cohere API Key", category: "cohere" },
+    KeyPattern { prefix: "cohere-", min_len: 16, max_len: 80, provider: "Cohere API Key", category: "cohere", safe: false },
     // Fireworks
-    KeyPattern { prefix: "fireworks-", min_len: 16, max_len: 80, provider: "Fireworks AI Token", category: "fireworks" },
+    KeyPattern { prefix: "fireworks-", min_len: 16, max_len: 80, provider: "Fireworks AI Token", category: "fireworks", safe: false },
     // Mistral
-    KeyPattern { prefix: "mistral-", min_len: 16, max_len: 80, provider: "Mistral AI API Key", category: "mistral" },
+    KeyPattern { prefix: "mistral-", min_len: 16, max_len: 80, provider: "Mistral AI API Key", category: "mistral", safe: false },
     // Nvidia
-    KeyPattern { prefix: "nvapi-", min_len: 16, max_len: 80, provider: "Nvidia NIM API Key", category: "nvidia" },
+    KeyPattern { prefix: "nvapi-", min_len: 16, max_len: 80, provider: "Nvidia NIM API Key", category: "nvidia", safe: false },
     // Together
-    KeyPattern { prefix: "together-", min_len: 16, max_len: 80, provider: "Together AI API Key", category: "together" },
+    KeyPattern { prefix: "together-", min_len: 16, max_len: 80, provider: "Together AI API Key", category: "together", safe: false },
     // Azure / JWT
-    KeyPattern { prefix: "0.AAA", min_len: 16, max_len: 200, provider: "Azure AD Token", category: "azure" },
+    KeyPattern { prefix: "0.AAA", min_len: 16, max_len: 200, provider: "Azure AD Token", category: "azure", safe: false },
     // Alibaba
-    KeyPattern { prefix: "LTAI", min_len: 12, max_len: 60, provider: "Alibaba Cloud Access Key", category: "alibaba" },
+    KeyPattern { prefix: "LTAI", min_len: 12, max_len: 60, provider: "Alibaba Cloud Access Key", category: "alibaba", safe: false },
     // Cloudflare
-    KeyPattern { prefix: "cloudflare_", min_len: 16, max_len: 80, provider: "Cloudflare API Token", category: "cloudflare" },
+    KeyPattern { prefix: "cloudflare_", min_len: 16, max_len: 80, provider: "Cloudflare API Token", category: "cloudflare", safe: false },
     // Heroku
-    KeyPattern { prefix: "HRKU", min_len: 16, max_len: 80, provider: "Heroku API Key", category: "heroku" },
+    KeyPattern { prefix: "HRKU", min_len: 16, max_len: 80, provider: "Heroku API Key", category: "heroku", safe: false },
     // PyPI
-    KeyPattern { prefix: "pypi-", min_len: 16, max_len: 100, provider: "PyPI API Token", category: "pypi" },
+    KeyPattern { prefix: "pypi-", min_len: 16, max_len: 100, provider: "PyPI API Token", category: "pypi", safe: false },
     // ElevenLabs
-    KeyPattern { prefix: "elevenlabs-", min_len: 16, max_len: 80, provider: "ElevenLabs API Key", category: "elevenlabs" },
+    KeyPattern { prefix: "elevenlabs-", min_len: 16, max_len: 80, provider: "ElevenLabs API Key", category: "elevenlabs", safe: false },
     // Square
-    KeyPattern { prefix: "sq0atp-", min_len: 10, max_len: 50, provider: "Square Access Token", category: "square" },
-    KeyPattern { prefix: "sq0csp-", min_len: 16, max_len: 100, provider: "Square Application Secret", category: "square" },
+    KeyPattern { prefix: "sq0atp-", min_len: 10, max_len: 50, provider: "Square Access Token", category: "square", safe: false },
+    KeyPattern { prefix: "sq0csp-", min_len: 16, max_len: 100, provider: "Square Application Secret", category: "square", safe: false },
     // Linear
-    KeyPattern { prefix: "lin_api_", min_len: 16, max_len: 80, provider: "Linear API Key", category: "linear" },
+    KeyPattern { prefix: "lin_api_", min_len: 16, max_len: 80, provider: "Linear API Key", category: "linear", safe: false },
     // Sentry
-    KeyPattern { prefix: "sntrys_", min_len: 16, max_len: 100, provider: "Sentry Auth Token", category: "sentry" },
+    KeyPattern { prefix: "sntrys_", min_len: 16, max_len: 100, provider: "Sentry Auth Token", category: "sentry", safe: false },
     // NPM
-    KeyPattern { prefix: "npm_", min_len: 16, max_len: 100, provider: "NPM Access Token", category: "npm" },
+    KeyPattern { prefix: "npm_", min_len: 16, max_len: 100, provider: "NPM Access Token", category: "npm", safe: false },
     // RubyGems
-    KeyPattern { prefix: "rubygems_", min_len: 16, max_len: 80, provider: "RubyGems API Key", category: "rubygems" },
+    KeyPattern { prefix: "rubygems_", min_len: 16, max_len: 80, provider: "RubyGems API Key", category: "rubygems", safe: false },
     // Flutterwave
-    KeyPattern { prefix: "FLWSECK_", min_len: 16, max_len: 80, provider: "Flutterwave Secret Key", category: "flutterwave" },
+    KeyPattern { prefix: "FLWSECK_", min_len: 16, max_len: 80, provider: "Flutterwave Secret Key", category: "flutterwave", safe: false },
     // AssemblyAI
-    KeyPattern { prefix: "assemblyai_", min_len: 16, max_len: 80, provider: "AssemblyAI API Key", category: "assemblyai" },
+    KeyPattern { prefix: "assemblyai_", min_len: 16, max_len: 80, provider: "AssemblyAI API Key", category: "assemblyai", safe: false },
     // Vercel
-    KeyPattern { prefix: "vercel_", min_len: 10, max_len: 80, provider: "Vercel API Token", category: "vercel" },
+    KeyPattern { prefix: "vercel_", min_len: 10, max_len: 80, provider: "Vercel API Token", category: "vercel", safe: false },
     // Voyage
-    KeyPattern { prefix: "voyage-", min_len: 16, max_len: 80, provider: "Voyage AI API Key", category: "voyage" },
+    KeyPattern { prefix: "voyage-", min_len: 16, max_len: 80, provider: "Voyage AI API Key", category: "voyage", safe: false },
     // PayPal
-    KeyPattern { prefix: "A21A", min_len: 16, max_len: 80, provider: "PayPal Client ID", category: "paypal" },
+    KeyPattern { prefix: "A21A", min_len: 16, max_len: 80, provider: "PayPal Client ID", category: "paypal", safe: false },
     // Meta / Facebook
-    KeyPattern { prefix: "EAAC", min_len: 20, max_len: 500, provider: "Facebook Access Token", category: "meta" },
-    KeyPattern { prefix: "EAAG", min_len: 20, max_len: 500, provider: "Facebook Graph API Token", category: "meta" },
-    KeyPattern { prefix: "EAAE", min_len: 20, max_len: 500, provider: "Facebook Enterprise Token", category: "meta" },
+    KeyPattern { prefix: "EAAC", min_len: 20, max_len: 500, provider: "Facebook Access Token", category: "meta", safe: false },
+    KeyPattern { prefix: "EAAG", min_len: 20, max_len: 500, provider: "Facebook Graph API Token", category: "meta", safe: false },
+    KeyPattern { prefix: "EAAE", min_len: 20, max_len: 500, provider: "Facebook Enterprise Token", category: "meta", safe: false },
     // DashScope / Alibaba Cloud AI
-    KeyPattern { prefix: "sk-ws-", min_len: 80, max_len: 200, provider: "DashScope API Key", category: "dashscope" },
-    KeyPattern { prefix: "sk-sp-", min_len: 80, max_len: 200, provider: "DashScope Code Plan Key", category: "dashscope" },
+    KeyPattern { prefix: "sk-ws-", min_len: 80, max_len: 200, provider: "DashScope API Key", category: "dashscope", safe: false },
+    KeyPattern { prefix: "sk-sp-", min_len: 80, max_len: 200, provider: "DashScope Code Plan Key", category: "dashscope", safe: false },
+    // Stripe publishable test (safe — designed for client-side use)
+    KeyPattern { prefix: "pk_test_", min_len: 16, max_len: 100, provider: "Stripe Publishable Key (Test)", category: "stripe", safe: true },
 ];
 
 // ---------------------------------------------------------------------------
@@ -251,17 +257,30 @@ pub struct GreyhatScanner {
 }
 
 impl GreyhatScanner {
-    /// Build a new scanner with all registered key patterns loaded.
-    pub fn new() -> Self {
+    /// Build a new scanner with registered key patterns loaded.
+    ///
+    /// When `include_safe` is `false` (the default), patterns marked as
+    /// `safe: true` (e.g. Stripe publishable keys, customer IDs) are
+    /// excluded since they are designed to be public/client-side.
+    pub fn new(include_safe: bool) -> Self {
         let mut smack = Smack::create("greyhat", SmackCase::Sensitive);
+        let mut loaded = 0usize;
         for pattern in KEY_PATTERNS {
+            if !include_safe && pattern.safe {
+                continue;
+            }
             smack.add_pattern(
                 pattern.prefix.as_bytes(),
                 ID_KEY,
                 SmackFlags::NONE,
             );
+            loaded += 1;
         }
         smack.compile();
+        log::info!("[scanner] {} patterns loaded ({} safe patterns {})",
+            loaded,
+            KEY_PATTERNS.len() - loaded,
+            if include_safe { "included" } else { "excluded" });
 
         Self {
             smack,
@@ -478,7 +497,7 @@ impl GreyhatScanner {
 
 impl Default for GreyhatScanner {
     fn default() -> Self {
-        Self::new()
+        Self::new(false)
     }
 }
 
@@ -562,7 +581,7 @@ mod tests {
 
     #[test]
     fn test_filter_rejects_known_false_positives() {
-        let scanner = GreyhatScanner::new();
+        let scanner = GreyhatScanner::new(true);
         assert!(!scanner.passes_filters("1.1.1.1", "AKIAIOSFODNN7EXAMPLE1"));
         assert!(!scanner.passes_filters("1.1.1.1", "iVBORw0KGgoAAAANSUhEUgAAAA"));
         assert!(!scanner.passes_filters("1.1.1.1", "R0lGODlhAQABAIAAAAAAAP"));
@@ -575,7 +594,7 @@ mod tests {
 
     #[test]
     fn test_filter_accepts_real_keys() {
-        let scanner = GreyhatScanner::new();
+        let scanner = GreyhatScanner::new(true);
         assert!(scanner.passes_filters("1.1.1.1", "ghp_aBcDeFgHiJkLmNoPqRsT"));
         assert!(scanner.passes_filters("1.1.1.1", "gsk_TestAbcdefghijklmnopqrstuvwxyz12345"));
     }
