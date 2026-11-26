@@ -162,13 +162,14 @@ pub fn start_server(listen_port: u16, cfg: &TorConfig) -> Result<TorHandle, Stri
         .arg(format!("{} 127.0.0.1:{}", ONION_VPORT, listen_port))
         .arg("--ClientOnly")
         .arg("1")
-        .arg("--AvoidDiskWrites")
-        .arg("1")
         .arg("--CookieAuthentication")
         .arg("0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        // Nothing drains a pipe here: tor logging to a pipe nobody reads
+        // eventually blocks the process, which looks exactly like a bootstrap
+        // hang. It writes to tor.log instead.
+        .stderr(Stdio::null());
 
     let child = spawn(cmd, &binary)?;
     let pidfile = write_pidfile(&data_dir, child.id())?;
@@ -244,11 +245,9 @@ pub fn start_client(cfg: &TorConfig) -> Result<TorHandle, String> {
         .arg(format!("notice file {}", logfile.display()))
         .arg("--ClientOnly")
         .arg("1")
-        .arg("--AvoidDiskWrites")
-        .arg("1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::null());
 
     let child = spawn(cmd, &binary)?;
     let pidfile = write_pidfile(&data_dir, child.id())?;
@@ -417,11 +416,43 @@ fn wait_for_bootstrap(managed: &ManagedTor, timeout: Duration) -> Result<(), Str
         std::thread::sleep(Duration::from_millis(250));
     }
 
+    let detail = bootstrap_diagnosis(&managed.logfile);
     Err(format!(
-        "tor did not bootstrap within {}s; see {}",
+        "tor did not bootstrap within {}s.\n{}\nFull log: {}\n\
+         If the network blocks Tor, use a bridge or --tor-socks with an existing \
+         tor; a slow link may need --tor-timeout 600.",
         timeout.as_secs(),
+        detail,
         managed.logfile.display()
     ))
+}
+
+/// Last thing tor said before it stalled, so the failure is actionable.
+fn bootstrap_diagnosis(logfile: &Path) -> String {
+    let text = std::fs::read_to_string(logfile).unwrap_or_default();
+    if text.trim().is_empty() {
+        return "tor produced no log output at all (did it start?)".to_string();
+    }
+
+    let mut progress = String::from("no bootstrap progress reported");
+    let mut warnings: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if let Some(idx) = line.find("Bootstrapped ") {
+            progress = line[idx..].trim().to_string();
+        }
+        if line.contains("[warn]") || line.contains("[err]") {
+            warnings.push(line.trim().to_string());
+        }
+    }
+
+    let mut out = format!("last progress: {}", progress);
+    if !warnings.is_empty() {
+        out.push_str("\nrecent tor warnings:");
+        for line in warnings.iter().rev().take(5).rev() {
+            out.push_str(&format!("\n  {}", line));
+        }
+    }
+    out
 }
 
 fn process_alive(pid: u32) -> bool {

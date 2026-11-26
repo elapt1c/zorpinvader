@@ -465,8 +465,11 @@ pub struct Zorp {
     /// Controller listen port (`--server <port>`).
     pub server_port: u16,
 
-    /// Controller listen address (default 0.0.0.0).
+    /// Controller listen address (default 0.0.0.0, or 127.0.0.1 with --tor).
     pub server_bind: String,
+
+    /// True when --server-bind was given explicitly.
+    pub server_bind_set: bool,
 
     /// Optional shared secret. Without it the controller accepts any worker that
     /// has the address (onion or URL).
@@ -576,6 +579,7 @@ impl Default for Zorp {
             mode: Mode::Local,
             server_port: 0,
             server_bind: "0.0.0.0".to_string(),
+            server_bind_set: false,
             token: None,
             client_url: String::new(),
             client_name: None,
@@ -1195,6 +1199,7 @@ impl Zorp {
                 }
                 if let Some(bind) = bind {
                     self.server_bind = bind;
+                    self.server_bind_set = true;
                 }
                 self.server_port = port;
                 self.mode = Mode::Server;
@@ -1205,6 +1210,7 @@ impl Zorp {
 
             "server-bind" | "bind" => {
                 self.server_bind = value.to_string();
+                self.server_bind_set = true;
             }
 
             "token" | "server-token" | "client-token" => {
@@ -1228,6 +1234,15 @@ impl Zorp {
 
             "tor" | "onion" => {
                 self.tor = Self::parse_boolean(value);
+                // `--tor` on its own is a controller: publishing an onion service
+                // is the whole point, and the local port is an implementation
+                // detail tor proxies to. A client still wins if it was asked for.
+                if self.tor && self.client_url.is_empty() {
+                    self.mode = Mode::Server;
+                    if self.op == Operation::Default {
+                        self.op = Operation::Scan;
+                    }
+                }
             }
 
             "tor-socks" | "socks" => {
@@ -1438,7 +1453,8 @@ Common options:
     --echo               Print current config and exit
 
 Distributed scanning:
-    --server <port>      Run a controller: plan blocks and hand them to clients
+    --server [port]      Run a controller: plan blocks and hand them to clients
+                         (with --tor the port is optional: one is picked)
     --server-bind <ip>   Controller listen address (default: 0.0.0.0)
     --token <secret>     Optional shared secret; without it the controller is
                          open to any worker that has the address
@@ -1565,9 +1581,52 @@ mod tests {
     #[test]
     fn test_zorp_default() {
         let zorp = Zorp::new();
-        assert_eq!(zorp.max_rate, DEFAULT_RATE);
+        // 0 means uncapped: the default rate was removed deliberately.
+        assert_eq!(zorp.max_rate, 0.0);
         assert!(zorp.scan_type.tcp);
         assert!(zorp.is_banners);
+    }
+
+    #[test]
+    fn tor_alone_is_a_controller_without_a_port() {
+        let zorp = Zorp::from_args(&[
+            "zorpinvader".to_string(),
+            "--tor".to_string(),
+            "-p".to_string(),
+            "80,443".to_string(),
+        ])
+        .unwrap();
+        assert!(zorp.tor);
+        assert_eq!(zorp.mode, Mode::Server);
+        // 0 means "let the OS pick" and bind to loopback.
+        assert_eq!(zorp.server_port, 0);
+        assert!(!zorp.server_bind_set);
+    }
+
+    #[test]
+    fn client_with_tor_stays_a_client() {
+        let zorp = Zorp::from_args(&[
+            "zorpinvader".to_string(),
+            "--client".to_string(),
+            "abc.onion".to_string(),
+            "--tor".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(zorp.mode, Mode::Client);
+        assert!(zorp.tor);
+    }
+
+    #[test]
+    fn explicit_bind_and_port_are_remembered() {
+        let zorp = Zorp::from_args(&[
+            "zorpinvader".to_string(),
+            "--server".to_string(),
+            "0.0.0.0:8000".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(zorp.server_port, 8000);
+        assert_eq!(zorp.server_bind, "0.0.0.0");
+        assert!(zorp.server_bind_set);
     }
 
     #[test]

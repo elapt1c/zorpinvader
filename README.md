@@ -114,12 +114,12 @@ sudo ./bin/zorpinvader --resume --rate 10000 -p 80,443
 | `--retries <n>` | Number of retransmits | `0` |
 | `--shard n/m` | Static sharding of the block set | `1/1` |
 | `--seed <n>` | Random seed (block order, probe shuffle) | random |
-| `--resume` | Continue the scan in the state file | off |
-| `--reset` | Ignore an existing state file | off |
+| `--resume` | Accepted for compatibility; an existing progress file resumes | always |
+| `--reset` | Start over, ignoring an existing progress file | off |
 | `--state <file>` | Progress file (coverage, leases, onion, token) | `zorpinvader.progress` |
 | `--results-dir <dir>` | Where results are written | `.` |
 | `--job-size <addrs>` | Addresses per job block | auto |
-| `--server <port>` | Run a controller | — |
+| `--server [port]` | Run a controller (port optional with `--tor`) | auto |
 | `--server-bind <ip>` | Controller listen address | `0.0.0.0` |
 | `--client <url>` | Join a controller and scan its blocks | — |
 | `--client-name <name>` | Client name in the controller status | hostname |
@@ -280,11 +280,15 @@ Valid: 12 │ Invalid: 835 │ Pending: 4
 ## Over Tor
 
 A controller can publish itself as an onion service, and a client can reach it
-with nothing but the address — no port to open, no tunnel, no certificates:
+with nothing but the address — no port to open, no tunnel, no certificates.
+`--tor` implies controller mode, so there is no port to choose and no listener to
+expose: the local HTTP port is picked automatically and bound to `127.0.0.1`,
+which is all tor needs.
 
 ```bash
-# controller: publishes <56 chars>.onion and writes it to the progress file
-zorpinvader --server 8000 --tor -p 80,443 --rate 40000
+# --tor is a controller on its own: it picks a local port on loopback,
+# publishes <56 chars>.onion and writes it to the progress file
+zorpinvader --tor -p 80,443 --rate 40000
 
 # any worker, from anywhere — the address is the only argument needed
 zorpinvader --client q3uod25xuv32meewcju6awkxszr2pobzqum34itj27sz34lmxnwe7bad.onion

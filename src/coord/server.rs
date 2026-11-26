@@ -76,7 +76,6 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         include_safe: zorp.include_safe,
         tpc: zorp.tpc,
         target_rate: zorp.max_rate,
-        resume: zorp.auto_resume,
         reset: zorp.reset_state,
     };
 
@@ -88,7 +87,16 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         }
     };
 
-    let bind_addr = format!("{}:{}", zorp.server_bind, zorp.server_port);
+    // With --tor the local listener is an implementation detail: tor proxies
+    // its virtual port to 127.0.0.1:<port>. So default the bind to loopback and
+    // let the OS pick a port when none was asked for — no port to choose, no
+    // port to expose.
+    let bind_host = if zorp.tor && !zorp.server_bind_set {
+        "127.0.0.1".to_string()
+    } else {
+        zorp.server_bind.clone()
+    };
+    let bind_addr = format!("{}:{}", bind_host, zorp.server_port);
     let listener = match TcpListener::bind(&bind_addr) {
         Ok(l) => l,
         Err(e) => {
@@ -100,6 +108,13 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         eprintln!("ERROR: cannot configure listener: {}", e);
         return 1;
     }
+    let listen_port = match listener.local_addr() {
+        Ok(addr) => addr.port(),
+        Err(e) => {
+            eprintln!("ERROR: cannot read listener address: {}", e);
+            return 1;
+        }
+    };
 
     // Publish over tor when asked. The onion address is part of the progress
     // file, so a worker can be started from that file alone.
@@ -119,7 +134,7 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         timeout: Duration::from_secs(zorp.tor_timeout),
     };
     let mut tor_handle = if zorp.tor {
-        match tor::start_server(zorp.server_port, &tor_cfg) {
+        match tor::start_server(listen_port, &tor_cfg) {
             Ok(handle) => Some(handle),
             Err(e) => {
                 eprintln!("ERROR: {}", e);
@@ -130,11 +145,11 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         None
     };
 
-    let listen = format!("{}:{}", zorp.server_bind, zorp.server_port);
+    let listen = format!("{}:{}", bind_host, listen_port);
     let onion = tor_handle.as_ref().and_then(|t| t.onion.clone());
     let url = match &onion {
         Some(onion) => format!("http://{}", onion),
-        None => format!("http://{}:{}", display_host(&zorp.server_bind), zorp.server_port),
+        None => format!("http://{}:{}", display_host(&bind_host), listen_port),
     };
     let connection = ConnectionInfo {
         listen: listen.clone(),
@@ -165,7 +180,7 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
 
     print_banner(
         &plan,
-        &bind_addr,
+        &listen,
         token.as_deref(),
         zorp.lease_s,
         &connection,

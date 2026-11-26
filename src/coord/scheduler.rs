@@ -46,9 +46,7 @@ pub struct Options {
     pub tpc: usize,
     /// Aggregate packet rate for the whole scan; 0 means uncapped.
     pub target_rate: f64,
-    /// Continue the scan recorded in `state_path`. Without it, an existing state
-    /// file is an error rather than something to silently overwrite.
-    pub resume: bool,
+    /// Start over even if `state_path` holds a scan.
     pub reset: bool,
 }
 
@@ -212,17 +210,13 @@ impl Scheduler {
             key_log_cap: 200,
         };
 
-        if scheduler.opts.state_path.exists() {
-            if !scheduler.opts.resume && !scheduler.opts.reset {
-                return Err(format!(
-                    "{} already holds a scan. Pass --resume to continue it or --reset to start over.",
-                    scheduler.opts.state_path.display()
-                ));
-            }
-            if scheduler.opts.resume {
-                scheduler.apply_state()?;
-            }
-        } else if !scheduler.opts.resume && !scheduler.opts.reset {
+        // Resuming is the default: a progress file in the working directory is
+        // the scan in progress. A different plan is a hard error rather than a
+        // silent restart, because silently discarding coverage is worse than
+        // one flag.
+        if scheduler.opts.state_path.exists() && !scheduler.opts.reset {
+            scheduler.apply_state()?;
+        } else if !scheduler.opts.reset {
             log::info!(
                 "[state] no state at {}, starting a fresh scan plan",
                 scheduler.opts.state_path.display()
@@ -252,7 +246,8 @@ impl Scheduler {
         if state.fingerprint != ours {
             return Err(format!(
                 "{} belongs to a different scan plan (state {}, current {}). \
-                 Ports or target ranges changed. Pass --reset to start over.",
+                 Ports or target ranges changed: pass --reset to start this scan \
+                 over, or --state <other-file> to keep both.",
                 path.display(),
                 state.fingerprint,
                 ours
@@ -992,7 +987,6 @@ mod tests {
             include_safe: false,
             tpc: 2,
             target_rate: 10_000.0,
-            resume: true,
             reset: false,
         }
     }

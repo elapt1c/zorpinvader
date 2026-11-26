@@ -46,7 +46,6 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         include_safe: zorp.include_safe,
         tpc: zorp.tpc,
         target_rate: zorp.max_rate,
-        resume: zorp.auto_resume,
         reset: zorp.reset_state,
     };
 
@@ -234,7 +233,9 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         zorp.state_file.display()
     );
     if status_snapshot.percent < 100.0 {
-        eprintln!("[+] resume with: --resume");
+        // Nothing to remember: the progress file is the state, and running the
+        // same command again picks it up.
+        eprintln!("[+] run the same command again to resume");
     }
     eprintln!("[+] results in {}", scheduler.results_dir().display());
 
