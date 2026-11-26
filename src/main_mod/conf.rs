@@ -17,7 +17,7 @@ use crate::massip::addr::{Ipv4Address, Ipv6Address, MacAddress, IpAddress};
 use crate::rawsock::adapter::{Adapter, LinkType};
 
 /// Version string for ZorpInvader.
-pub const VERSION: &str = "1.3.9-integration";
+pub const VERSION: &str = "1.4.0-distributed";
 
 /// Maximum number of network interfaces.
 pub const MAX_NICS: usize = 8;
@@ -89,6 +89,18 @@ impl OutputFormat {
             _ => None,
         }
     }
+}
+
+/// How this process participates in the scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Scheduler and scanner in one process (default).
+    #[default]
+    Local,
+    /// Controller: plans blocks, allocates work, aggregates results. Never scans.
+    Server,
+    /// Worker: claims blocks from a controller and scans them.
+    Client,
 }
 
 /// Scan type configuration.
@@ -441,8 +453,41 @@ pub struct Zorp {
     /// Computed automatically from range size if not set (default: range/64).
     pub stride: u64,
 
-    /// Resume a previous scan from paused.conf instead of starting fresh.
+    /// Resume a previous scan from the state file instead of starting fresh.
     pub auto_resume: bool,
+
+    /// Start over even if a state file exists.
+    pub reset_state: bool,
+
+    /// Mode: standalone, controller or client.
+    pub mode: Mode,
+
+    /// Controller listen port (`--server <port>`).
+    pub server_port: u16,
+
+    /// Controller listen address (default 0.0.0.0).
+    pub server_bind: String,
+
+    /// Shared secret; the controller generates one when not supplied.
+    pub token: Option<String>,
+
+    /// Controller base URL (`--client <url>`).
+    pub client_url: String,
+
+    /// Human-readable client name; defaults to the hostname.
+    pub client_name: Option<String>,
+
+    /// Scan state file (coverage + leases).
+    pub state_file: PathBuf,
+
+    /// Where the controller writes open_ports.csv and found_keys.csv.
+    pub results_dir: PathBuf,
+
+    /// Addresses per job block; 0 selects automatically.
+    pub job_size: u64,
+
+    /// Seconds a block stays leased without a progress report.
+    pub lease_s: u64,
 }
 
 impl Default for Zorp {
@@ -511,6 +556,17 @@ impl Default for Zorp {
             include_safe: false,
             stride: 0,
             auto_resume: false,
+            reset_state: false,
+            mode: Mode::Local,
+            server_port: 0,
+            server_bind: "0.0.0.0".to_string(),
+            token: None,
+            client_url: String::new(),
+            client_name: None,
+            state_file: PathBuf::from("zorp-state.json"),
+            results_dir: PathBuf::from("."),
+            job_size: 0,
+            lease_s: 180,
         }
     }
 }
@@ -1100,6 +1156,78 @@ impl Zorp {
                 self.auto_resume = Self::parse_boolean(value);
             }
 
+            "reset" | "fresh" | "no-resume" => {
+                self.reset_state = Self::parse_boolean(value);
+            }
+
+            "server" | "listen" | "controller" => {
+                // Accept `--server 8000` and `--server 0.0.0.0:8000`.
+                let (bind, port) = match value.rsplit_once(':') {
+                    Some((bind, port)) => (Some(bind.to_string()), port),
+                    None => (None, value),
+                };
+                let port: u16 = port
+                    .parse()
+                    .map_err(|_| format!("server: invalid port: {}", value))?;
+                if port == 0 {
+                    return Err("server: port must be greater than 0".to_string());
+                }
+                if let Some(bind) = bind {
+                    self.server_bind = bind;
+                }
+                self.server_port = port;
+                self.mode = Mode::Server;
+                if self.op == Operation::Default {
+                    self.op = Operation::Scan;
+                }
+            }
+
+            "server-bind" | "bind" => {
+                self.server_bind = value.to_string();
+            }
+
+            "token" | "server-token" | "client-token" => {
+                self.token = Some(value.to_string());
+            }
+
+            "client" | "controller-url" => {
+                if value.trim().is_empty() {
+                    return Err("client: missing controller URL".to_string());
+                }
+                self.client_url = value.trim_end_matches('/').to_string();
+                self.mode = Mode::Client;
+                if self.op == Operation::Default {
+                    self.op = Operation::Scan;
+                }
+            }
+
+            "client-name" | "worker-name" => {
+                self.client_name = Some(value.to_string());
+            }
+
+            "state" | "state-file" | "checkpoint" => {
+                self.state_file = PathBuf::from(value);
+            }
+
+            "results-dir" | "output-dir" => {
+                self.results_dir = PathBuf::from(value);
+            }
+
+            "job-size" | "block-size" | "job" => {
+                self.job_size = value
+                    .parse()
+                    .map_err(|_| format!("job-size: invalid number: {}", value))?;
+            }
+
+            "lease" | "lease-seconds" => {
+                self.lease_s = value
+                    .parse()
+                    .map_err(|_| format!("lease: invalid number: {}", value))?;
+                if self.lease_s < 10 {
+                    return Err("lease: must be at least 10 seconds".to_string());
+                }
+            }
+
             // Silently ignore some parameters
             "randomize-hosts" | "send-eth" | "nobacktrace" | "backtrace" => {}
 
@@ -1173,6 +1301,9 @@ impl Zorp {
                 | "arpscan"
                 | "arp"
                 | "ping"
+                | "reset"
+                | "fresh"
+                | "no-resume"
         )
     }
 
@@ -1237,7 +1368,8 @@ Common options:
     --tpc <n>            Fetcher threads per core (default: 16, max: 32)
     --include-safe       Also detect "safe" keys (Stripe publishable, customer IDs)
     --stride <n>         Index stride for spirograph coverage (default: range/64)
-    --resume             Resume previous scan from paused.conf
+    --resume             Resume the scan recorded in zorp-state.json
+    --reset              Ignore an existing state file and start over
     --banners            Enable banner/API key scanning (required)
     --adapter-ip <ip>    Set source IP manually
     --adapter-mac <mac>  Set source MAC manually
@@ -1245,79 +1377,26 @@ Common options:
     -c <filename>        Use a config file
     --echo               Print current config and exit
 
+Distributed scanning:
+    --server <port>      Run a controller: plan blocks and hand them to clients
+    --server-bind <ip>   Controller listen address (default: 0.0.0.0)
+    --token <secret>     Shared secret; printed by the controller if omitted
+    --client <url>       Join a controller (http:// or https://) and scan blocks
+    --client-name <name> Client name shown in the controller status (default: hostname)
+    --job-size <addrs>   Addresses per block (default: automatic, keeps blocks ≤ 65536)
+    --lease <seconds>    Lease before a silent client's block is reassigned (default: 180)
+    --state <file>       Scan state file (default: zorp-state.json)
+    --results-dir <dir>  Where results are written (default: current directory)
+
+A controller never transmits; clients need the raw-socket privileges. The
+controller speaks plain HTTP, so put it behind cloudflared/Caddy/nginx for TLS.
+
 Parameters can be set via command-line or config file. To generate a
 config file from current settings:
 
     zorpinvader --echo > myscan.conf
 "#
         );
-    }
-
-    /// Save current scan state to paused.conf for resuming.
-    ///
-    /// `index` is the current position in the index space.
-    pub fn save_state(&self, index: u64) -> Result<(), String> {
-        let filename = "paused.conf";
-
-        let mut file = File::create(filename).map_err(|e| format!("{}: {}", filename, e))?;
-
-        writeln!(file, "# ZorpInvader scan state — auto-saved").ok();
-        writeln!(file, "# Resume with: zorpinvader --resume").ok();
-        writeln!(file, "rate = {}", self.max_rate).ok();
-        writeln!(file, "seed = {}", self.seed).ok();
-        writeln!(file, "stride = {}", self.stride).ok();
-        writeln!(file, "resume-index = {}", index).ok();
-
-        if !self.nic.is_empty() && !self.nic[0].ifname.is_empty() {
-            writeln!(file, "adapter = {}", self.nic[0].ifname).ok();
-        }
-
-        for range in &self.target_ranges {
-            writeln!(file, "range = {}", range).ok();
-        }
-
-        if !self.ports.is_empty() {
-            writeln!(file, "ports = {}", self.ports).ok();
-        }
-
-        Ok(())
-    }
-
-    /// Load scan state from paused.conf and apply it to this config.
-    /// Returns `true` if a state file was found and loaded.
-    pub fn load_state(&mut self) -> bool {
-        let filename = "paused.conf";
-        let contents = match std::fs::read_to_string(filename) {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
-        for line in contents.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((key, val)) = line.split_once('=') {
-                let key = key.trim();
-                let val = val.trim();
-                match key {
-                    "resume-index" => {
-                        if let Ok(v) = val.parse::<u64>() {
-                            self.resume.index = v;
-                        }
-                    }
-                    "stride" => {
-                        if let Ok(v) = val.parse::<u64>() {
-                            self.stride = v;
-                        }
-                    }
-                    _ => {} // ignore other keys — they'll be re-parsed normally
-                }
-            }
-        }
-
-        eprintln!("[+] resumed from {} (index={}, stride={})", filename, self.resume.index, self.stride);
-        true
     }
 
     /// Get the number of configured NICs.

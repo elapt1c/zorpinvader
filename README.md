@@ -55,6 +55,9 @@ sudo ./bin/zorpinvader --rate 5000 --range 10.0.0.0/8 -p 80,443
 
 # Use the watchdog for long-running scans (auto-restarts every 30 min)
 sudo ./run.sh 10000 16 "80,8080,8443,8000,3000,5000,8888"
+
+# Resume where the last run stopped (coverage, not a byte offset)
+sudo ./bin/zorpinvader --resume --rate 10000 -p 80,443
 ```
 
 ### Options
@@ -69,9 +72,127 @@ sudo ./run.sh 10000 16 "80,8080,8443,8000,3000,5000,8888"
 | `--adapter <name>` | Network interface | auto-detect |
 | `--adapter-ip <ip>` | Source IP | auto-detect |
 | `--retries <n>` | Number of retransmits | `0` |
-| `--shard n/m` | Distributed scanning | `1/1` |
-| `--seed <n>` | Random seed | random |
+| `--shard n/m` | Static sharding of the block set | `1/1` |
+| `--seed <n>` | Random seed (block order, probe shuffle) | random |
+| `--resume` | Continue the scan in the state file | off |
+| `--reset` | Ignore an existing state file | off |
+| `--state <file>` | Scan state (coverage + leases) | `zorp-state.json` |
+| `--results-dir <dir>` | Where results are written | `.` |
+| `--job-size <addrs>` | Addresses per job block | auto |
+| `--server <port>` | Run a controller | — |
+| `--server-bind <ip>` | Controller listen address | `0.0.0.0` |
+| `--client <url>` | Join a controller and scan its blocks | — |
+| `--client-name <name>` | Client name in the controller status | hostname |
+| `--token <secret>` | Shared secret (controller generates one) | — |
+| `--lease <seconds>` | Lease on an unresponsive client's block | `180` |
 | `--selftest` | Run regression tests | — |
+
+## Distributed scanning
+
+There are three ways to run, all on the same engine:
+
+| Mode | Command | What it does |
+|------|---------|--------------|
+| Standalone | `zorpinvader --rate 10000 -p 80,443` | Schedules and scans in one process |
+| Controller | `zorpinvader --server 8000 -p 80,443 --rate 40000` | Plans blocks, allocates them, aggregates results. Never transmits. |
+| Client | `zorpinvader --client https://zi.example.dev --token …` | Claims a block, scans it, reports hits and keys |
+
+```bash
+# Controller on a small VM, published through a Cloudflare tunnel
+zorpinvader --server 8000 -p 80,443 --rate 40000 --token "$TOKEN"
+cloudflared tunnel --url http://localhost:8000     # gives https://…trycloudflare.com
+
+# Any number of scanners, each on a host with the network path
+sudo zorpinvader --client https://zi.example.dev --token "$TOKEN"
+sudo zorpinvader --client http://ctrl.internal:8000 --token "$TOKEN"
+```
+
+The controller speaks plain HTTP/1.1 and clients use `curl`, so TLS is whatever
+terminates the public endpoint (`cloudflared`, Caddy, nginx) and the client trusts
+the system CA store. Nothing TLS-specific lives in this binary.
+
+### How work is allocated
+
+* The target set is divided into **CIDR-aligned blocks** (`--job-size`, or
+  automatically so a plan stays under 65,536 blocks).
+* The controller hands blocks out in a **seeded shuffled order**, so a partial
+  scan is spread across the address space instead of walking it front to back.
+  Within a block, probes go through a BlackRock permutation, so the wire order is
+  random too.
+* Every block is **leased**, not assigned (`--lease`, default 180 s). A client that
+  stops reporting loses its block, which goes back to the pool and resumes at the
+  last reported position. A dead machine costs at most one lease interval of
+  duplicated work.
+* `--rate` on the controller is an **aggregate**: it is divided between connected
+  clients and rebalanced as they come and go. A client's own `--rate` is a
+  ceiling, so `min(share, ceiling)` applies.
+
+The controller never scans, so it needs no raw sockets; the clients need the same
+privileges a standalone scan does.
+
+### Resume is coverage, not a cursor
+
+A scan's progress is a **set of addresses**, not an index into a shuffled space:
+
+* A completed block adds its interval to the covered set.
+* Resuming means `targets - covered`, which is exact and independent of how many
+  clients ran, or which machine did what.
+* The state file stores that set as a **minimal CIDR decomposition**, so it grows
+  with the number of *gaps* in coverage, not with the number of addresses. A
+  thousand contiguous `/24`s cost one interval, not 256,000 entries.
+
+Merging is done on intervals, which is exact, and each merged interval is then
+decomposed into the fewest CIDRs that cover it. Two adjacent `/24`s at
+`1.2.3.0/24` and `1.2.4.0/24` merge into one interval — but no single CIDR covers
+exactly that interval (a `/23` has to start on an even `/23` boundary), so it
+serialises back as the same two CIDRs. Adjacent runs that *are* aligned do
+collapse: `1.2.2.0/24` + `1.2.3.0/24` becomes `1.2.2.0/23`.
+
+```bash
+zorpinvader --resume --rate 10000 -p 80,443      # continue
+zorpinvader --reset  --rate 10000 -p 80,443      # start over
+```
+
+A state file without `--resume` is an error rather than something silently
+overwritten. Changing `--job-size` between runs keeps every completed address
+(coverage is per address); only in-block resume offsets are dropped.
+
+### Results
+
+The controller owns the authoritative copy:
+
+* `open_ports.csv` — `ip,port,client,job,timestamp`, one row per newly seen port.
+* `found_keys.csv` — confirmed keys, identical schema to the standalone output.
+
+Both are de-duplicated against what is already on disk, so a client re-delivering
+after a retry cannot inflate them. Clients keep their own `found_keys.csv` for
+local inspection and spool anything the controller could not accept to
+`zorp-spool-<client>.jsonl`, retrying on the next block and at startup — results
+are delivered independently of scheduling, so a late delivery is still accepted
+after a lease expires.
+
+### Control API
+
+All endpoints are JSON over HTTP, authenticated with `Authorization: Bearer <token>`
+(except `/healthz`). `--server` prints the token if none is supplied.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/v1/join` | Register, receive ports/blocks/lease settings |
+| `POST /api/v1/claim` | Lease the next block (or `done`) |
+| `POST /api/v1/progress` | Renew the lease, report position and counters |
+| `POST /api/v1/results` | Deliver hits and keys (independent of the lease) |
+| `POST /api/v1/complete` | Mark a block covered |
+| `POST /api/v1/release` | Give a block back unfinished |
+| `GET /api/v1/status` | Blocks, coverage, rate, ETA, clients |
+| `GET /api/v1/coverage` | Covered and remaining CIDRs |
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" https://zi.example.dev/api/v1/status | jq
+```
+
+Static sharding (`--shard n/m`) still works for sharded runs: each shard keeps
+every `m`-th block, so several machines with the same plan do not overlap.
 
 ## TUI
 
@@ -114,8 +235,21 @@ Status codes: `1` = confirmed, `2` = detected (unverified), `3` = exhausted.
 
 ```
 src/
-├── main.rs              # Entry point, transmit/receive threads
+├── main.rs              # Entry point and mode dispatch
 ├── lib.rs               # Library root
+├── coord/               # Distributed scanning
+│   ├── set4.rs          # IPv4 set algebra, minimal CIDR decomposition
+│   ├── plan.rs          # targets → aligned blocks, block ordering
+│   ├── scheduler.rs     # leases, coverage, state file, results de-dup
+│   ├── protocol.rs      # JSON wire format
+│   ├── http.rs          # minimal HTTP/1.1 server
+│   ├── server.rs        # controller: handlers around the scheduler
+│   ├── client.rs        # client loop (curl transport)
+│   └── local.rs         # standalone mode, same scheduler in-process
+├── engine/              # Scan unit
+│   ├── scan_unit.rs     # ScanEngine: adapter + pipeline, one block at a time
+│   ├── hits.rs          # per-block open-port collection
+│   └── keys.rs          # tails found_keys.csv for confirmed keys
 ├── greyhat/
 │   ├── greyhat.rs       # Aho-Corasick key scanner (54 patterns)
 │   ├── fetcher.rs       # Multi-threaded HTTP fetcher
