@@ -944,7 +944,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zorpinvader"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "base64",
  "chrono",

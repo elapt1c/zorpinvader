@@ -1,6 +1,6 @@
 [package]
 name = "zorpinvader"
-version = "1.4.3"
+version = "1.4.4"
 edition = "2021"
 description = "Internet-scale port scanner with API key detection"
 license = "AGPL-3.0"

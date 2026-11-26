@@ -366,9 +366,16 @@ Two things trip it up in practice:
   not that the tool is broken. Use a bridge, or point at a working tor with
   `--tor-socks`.
 
-When tor fails, the controller prints tor's own stderr (the actual reason), the
-last bootstrap line, recent warnings and the path of both logs. `--tor-timeout
-600` for slow links; `--tor-dir <dir>` to move the DataDirectory.
+When tor fails, the controller prints tor's own console output (the actual
+reason), the last bootstrap line, recent warnings and the path of both logs.
+`--tor-timeout 600` for slow links; `--tor-dir <dir>` to move the DataDirectory.
+
+ZorpInvader starts tor with `--defaults-torrc <its own empty torrc> -f <the same
+file>`, so the distribution's `/etc/tor/torrc` is never applied. That file
+usually sets `User tor`, which makes a non-root invocation fail with
+`Error setting groups to gid …: If you set the "User" option, you must start Tor
+as root`, and makes a root invocation drop privileges and then fail to read its
+own DataDirectory.
 
 ## Controller dashboard
 

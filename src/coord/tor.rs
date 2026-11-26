@@ -34,6 +34,18 @@ pub const COMMON_SOCKS_PORTS: [u16; 2] = [9050, 9150];
 /// Virtual port the onion service answers on, so the address is just `x.onion`.
 const ONION_VPORT: &str = "80";
 
+/// An empty torrc of our own, so the distro's is never read. Debian, Fedora and
+/// Arch all ship `/etc/tor/torrc` with `User tor`, which makes a non-root
+/// invocation die with "you must start Tor as root", and makes a root
+/// invocation drop privileges and then fail to read its own DataDirectory.
+/// tor refuses `/dev/null` as a config file, so this is a real (empty) file.
+fn write_isolated_torrc(data_dir: &Path) -> Result<PathBuf, String> {
+    let path = data_dir.join("torrc");
+    std::fs::write(&path, b"# Intentionally empty: ZorpInvader configures tor on the command line.\n")
+        .map_err(|e| format!("{}: {}", path.display(), e))?;
+    Ok(path)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TorMode {
     /// Off unless `--tor` was asked for.
@@ -169,7 +181,10 @@ pub fn start_server(listen_port: u16, cfg: &TorConfig) -> Result<TorHandle, Stri
 
     let console = console_to_file(&errfile)?;
 
+    let torrc = write_isolated_torrc(&data_dir)?;
+
     let mut cmd = Command::new(&binary);
+    cmd.arg("--defaults-torrc").arg(&torrc).arg("-f").arg(&torrc);
     cmd.arg("--SocksPort")
         .arg("0")
         .arg("--DataDirectory")
@@ -261,7 +276,10 @@ pub fn start_client(cfg: &TorConfig) -> Result<TorHandle, String> {
 
     let console = console_to_file(&errfile)?;
 
+    let torrc = write_isolated_torrc(&data_dir)?;
+
     let mut cmd = Command::new(&binary);
+    cmd.arg("--defaults-torrc").arg(&torrc).arg("-f").arg(&torrc);
     cmd.arg("--SocksPort")
         .arg(format!("127.0.0.1:{}", socks_port))
         .arg("--DataDirectory")
@@ -752,6 +770,48 @@ Nov 26 00:39:12.000 [notice] Bootstrapped 75% (enough_dirinfo): Loaded enough di
         let port = free_port().unwrap();
         assert!(port > 0);
         let _ = TcpListener::bind(("127.0.0.1", port)).expect("port should be free");
+    }
+
+    #[test]
+    fn the_system_torrc_is_never_read() {
+        // A fake tor that records the arguments it was started with, then dies.
+        let dir = std::env::temp_dir().join(format!("zorp-tor-argv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let argv_file = dir.join("argv");
+        let fake = dir.join("faketor.sh");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Tor version 0.4.9.'; exit 0; fi\n\
+                 printf '%s\\n' \"$@\" > {}\nexit 1\n",
+                argv_file.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let cfg = TorConfig {
+            binary: Some(fake),
+            data_dir: dir.join("data"),
+            timeout: Duration::from_secs(5),
+            ..TorConfig::new(dir.join("data"))
+        };
+        // It must fail (the fake exits), but only after being started with the
+        // isolation flags.
+        assert!(start_server(8080, &cfg).is_err());
+
+        let argv = std::fs::read_to_string(&argv_file).unwrap();
+        // A real torrc file of our own, never the distro's, never /dev/null
+        // (tor refuses non-regular config files).
+        assert!(argv.contains("-f\n") && argv.contains("/torrc"), "argv: {}", argv);
+        assert!(argv.contains("--defaults-torrc"), "argv: {}", argv);
+        assert!(!argv.contains("/etc/tor/torrc"), "argv: {}", argv);
+        assert!(!argv.contains("/dev/null"), "argv: {}", argv);
+        let torrc = dir.join("data").join("torrc");
+        assert!(torrc.is_file(), "empty torrc should be written");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
