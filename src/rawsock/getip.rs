@@ -50,7 +50,8 @@ fn get_if_addr(fd: RawFd, ifname: &str) -> io::Result<Option<Ipv4Addr>> {
     let ret = unsafe {
         libc::ioctl(
             fd,
-            SIOCGIFADDR,
+            // musl types this constant as u64, glibc as i32; let inference pick.
+            SIOCGIFADDR as _,
             &mut ifr as *mut IfreqAddr as *mut libc::c_void,
         )
     };

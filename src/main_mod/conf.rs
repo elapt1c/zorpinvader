@@ -17,7 +17,7 @@ use crate::massip::addr::{Ipv4Address, Ipv6Address, MacAddress, IpAddress};
 use crate::rawsock::adapter::{Adapter, LinkType};
 
 /// Version string for ZorpInvader.
-pub const VERSION: &str = "1.4.0-distributed";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Maximum number of network interfaces.
 pub const MAX_NICS: usize = 8;
@@ -1384,9 +1384,22 @@ impl Zorp {
     /// Print version information.
     pub fn print_version() {
         println!("ZorpInvader version {} (https://github.com/elapt1c/zorpinvader)", VERSION);
-        println!("Compiled on: {} {}", env!("CARGO_PKG_VERSION"), "rust");
-        println!("OS: {}", std::env::consts::OS);
-        println!("Architecture: {}", std::env::consts::ARCH);
+        println!(
+            "OS: {}  Architecture: {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+        // Which libc the binary carries decides whether it runs on an arbitrary
+        // distribution, so a deployment check can assert on it.
+        let libc = if cfg!(target_env = "musl") {
+            "musl (static)"
+        } else if cfg!(target_env = "gnu") {
+            "glibc (dynamic)"
+        } else {
+            "unknown"
+        };
+        println!("Libc: {}", libc);
+        println!("Kernel features: AF_PACKET raw sockets (needs root or CAP_NET_RAW)");
     }
 
     /// Print help information.

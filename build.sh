@@ -5,7 +5,9 @@ echo "=== ZorpInvader Build ==="
 echo "Optimizations: opt-level=3, fat LTO, codegen-units=1, panic=abort, stripped"
 echo ""
 
-# Native CPU tuning for maximum packet processing speed
+# Native CPU tuning for maximum packet processing speed.
+# NOTE: this makes the binary only run on this CPU family. Distributed release
+# binaries are built without it (see .github/workflows/release.yml).
 export RUSTFLAGS="-C target-cpu=native"
 
 echo "[1/4] Cleaning stale artifacts..."

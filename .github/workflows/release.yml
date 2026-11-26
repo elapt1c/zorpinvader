@@ -1,0 +1,91 @@
+name: release
+
+# Prebuilt binaries so deploying a worker is a download, not a Rust install.
+#
+# Every artifact is a statically linked musl binary built for baseline CPU
+# features: no glibc version pinning, no libpcap, no toolchain on the target.
+# x86_64 and aarch64 cover the usual VPS, bare metal and ARM boxes.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - target: aarch64-unknown-linux-musl
+            arch: aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-
+
+      - name: Cross linker (aarch64)
+        if: matrix.arch == 'aarch64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Verify the binary is self-contained
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/zorpinvader"
+          file "$bin"
+          if ldd "$bin" 2>&1 | grep -q "=>"; then
+            echo "::error::binary is dynamically linked; release artifacts must be static"
+            exit 1
+          fi
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="zorpinvader-${{ matrix.arch }}-linux-musl"
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/zorpinvader" "dist/$name"
+          chmod +x "dist/$name"
+          ( cd dist && sha256sum "$name" > "$name.sha256" )
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

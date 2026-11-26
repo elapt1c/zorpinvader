@@ -32,6 +32,46 @@ SYN probe → SYN-ACK → open port detected
 
 AWS, Google, GitHub, Stripe, OpenAI, Slack, Anthropic, Groq, DeepSeek, Mistral, Nvidia, Cohere, Fireworks, Together, HuggingFace, DigitalOcean, GitLab, CircleCI, SendGrid, Fastly, Cloudflare, Heroku, Azure, Alibaba/DashScope, Twitter/X, Discord, PayPal, Meta/Facebook, Twilio, PyPI, Mailgun, Square, Linear, Sentry, NPM, RubyGems, Vercel, OpenRouter, Voyage, ElevenLabs, Replicate, AssemblyAI, Flutterwave, and more.
 
+## Install (prebuilt)
+
+Release binaries are statically linked against musl and built for baseline CPU
+features (no `-C target-cpu=native`), so they run on any Linux — x86-64 or
+aarch64, glibc or musl, container or bare metal — with no toolchain, no
+libpcap and no glibc version pinning:
+
+```bash
+# x86-64
+curl -fsSL -o zorpinvader \
+  https://github.com/elapt1c/zorpinvader/releases/latest/download/zorpinvader-x86_64-linux-musl
+
+# aarch64 (Raspberry Pi, ARM VPS, Apple-silicon VM)
+curl -fsSL -o zorpinvader \
+  https://github.com/elapt1c/zorpinvader/releases/latest/download/zorpinvader-aarch64-linux-musl
+
+chmod +x zorpinvader && sudo mv zorpinvader /usr/local/bin/
+sudo zorpinvader --version
+```
+
+```text
+ZorpInvader version 1.4.0 (https://github.com/elapt1c/zorpinvader)
+OS: linux  Architecture: x86_64
+Libc: musl (static)
+```
+
+Each asset ships with a `.sha256` file; check it with `sha256sum -c`. Tarballs
+are provided too, for hosts that would rather unpack than download a raw binary.
+
+The full runtime dependency list is:
+
+| Need | Why |
+|------|-----|
+| root, or `CAP_NET_RAW`+`CAP_NET_ADMIN` | raw `AF_PACKET` sockets for the SYN probes |
+| `curl` | page/JS fetching and the client's control channel |
+| `tor` (optional) | only for `--tor` / `.onion`; one is supervised automatically, or an existing one on 9050 is reused |
+
+Kernel 3.17 or newer for `AF_PACKET` and `SO_RCVTIMEO` semantics as used here.
+Nothing else is required on the target machine.
+
 ## Build
 
 ```bash

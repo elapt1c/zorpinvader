@@ -42,7 +42,8 @@ fn get_hw_addr(fd: RawFd, ifname: &str) -> io::Result<MacAddress> {
     let ret = unsafe {
         libc::ioctl(
             fd,
-            SIOCGIFHWADDR,
+            // musl types this constant as u64, glibc as i32; let inference pick.
+            SIOCGIFHWADDR as _,
             &mut ifr as *mut IfreqHw as *mut libc::c_void,
         )
     };
