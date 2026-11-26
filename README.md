@@ -76,7 +76,7 @@ sudo ./bin/zorpinvader --resume --rate 10000 -p 80,443
 | `--seed <n>` | Random seed (block order, probe shuffle) | random |
 | `--resume` | Continue the scan in the state file | off |
 | `--reset` | Ignore an existing state file | off |
-| `--state <file>` | Scan state (coverage + leases) | `zorp-state.json` |
+| `--state <file>` | Progress file (coverage, leases, onion, token) | `zorpinvader.progress` |
 | `--results-dir <dir>` | Where results are written | `.` |
 | `--job-size <addrs>` | Addresses per job block | auto |
 | `--server <port>` | Run a controller | — |
@@ -85,6 +85,11 @@ sudo ./bin/zorpinvader --resume --rate 10000 -p 80,443
 | `--client-name <name>` | Client name in the controller status | hostname |
 | `--token <secret>` | Shared secret (controller generates one) | — |
 | `--lease <seconds>` | Lease on an unresponsive client's block | `180` |
+| `--tor` | Publish the controller on an onion service / force a client through tor | off |
+| `--tor-socks <h:p>` | Use an existing tor SOCKS proxy instead of starting one | auto (9050/9150) |
+| `--tor-binary <path>` | Explicit `tor` binary | from PATH |
+| `--tor-dir <dir>` | tor DataDirectory | next to the progress file |
+| `--tor-timeout <s>` | Bootstrap timeout | `180` |
 | `--selftest` | Run regression tests | — |
 
 ## Distributed scanning
@@ -153,8 +158,8 @@ zorpinvader --resume --rate 10000 -p 80,443      # continue
 zorpinvader --reset  --rate 10000 -p 80,443      # start over
 ```
 
-A state file without `--resume` is an error rather than something silently
-overwritten. Changing `--job-size` between runs keeps every completed address
+The progress file is `zorpinvader.progress`. A state file without `--resume` is
+an error rather than something silently overwritten. Changing `--job-size` between runs keeps every completed address
 (coverage is per address); only in-block resume offsets are dropped.
 
 ### Results
@@ -213,6 +218,97 @@ Fetcher: pages=29103 scripts=847 │ gzip=12 html=28991 <script>=4102 │ queue=
 Valid: 12 │ Invalid: 835 │ Pending: 4
 ```
 
+## Over Tor
+
+A controller can publish itself as an onion service, and a client can reach it
+with nothing but the address — no port to open, no tunnel, no certificates:
+
+```bash
+# controller: publishes <56 chars>.onion and writes it to the progress file
+zorpinvader --server 8000 --tor -p 80,443 --rate 40000 --token "$TOKEN"
+
+# any worker, from anywhere
+zorpinvader --client q3uod25xuv32meewcju6awkxszr2pobzqum34itj27sz34lmxnwe7bad.onion --token "$TOKEN"
+```
+
+Everything a worker needs is in the progress file, so the controller can be
+started on one machine and a worker on another by copying one line:
+
+```bash
+$ cat zorpinvader.progress | jq -r .connect
+zorpinvader --client http://q3uod….onion --token sk-…
+```
+
+The file also carries `onion`, `url`, `listen` and `token`, and is written `0600`
+because of the token.
+
+```
+{
+  "onion": "q3uod25xuv32meewcju6awkxszr2pobzqum34itj27sz34lmxnwe7bad.onion",
+  "url": "http://q3uod….onion",
+  "listen": "0.0.0.0:8000",
+  "token": "…",
+  "connect": "zorpinvader --client http://q3uod….onion --token …",
+  "done": ["10.9.0.0/28"], "partial": [], "next_ptr": 4, "syns": 16
+}
+```
+
+A `.onion` target makes the client use tor automatically; `--tor` forces it for
+a non-onion address. The client finds tor in this order:
+
+1. `--tor-socks host:port` if given (validated with a real SOCKS5 handshake);
+2. a tor already listening on `127.0.0.1:9050` or `9150`, reused as-is;
+3. a private instance it starts itself on an ephemeral SOCKS port.
+
+The controller always starts its own instance, because publishing a hidden
+service needs a `HiddenServiceDir`. Both roles wait for `Bootstrapped 100%` and
+report progress while they do.
+
+### Why tor is a supervised process, not a library
+
+Speaking the Tor protocol in-process would be the wrong engineering trade here.
+Arti, the Rust implementation, still marks onion-service *hosting* experimental
+and ships it behind `__is_experimental` APIs (arti 2.7 / `tor-hsservice` 0.47), and
+the C tor is the only implementation with a track record of publishing services.
+So ZorpInvader supervises a real `tor`:
+
+* it never downloads a binary — a missing `tor` is an error naming the install
+  command for your platform;
+* each instance gets its own DataDirectory, SOCKS port and hidden-service keys,
+  so it cannot collide with a tor you already run;
+* a pidfile is used to reap a tor that outlived a crashed run, and it is only
+  signalled after checking that its command line names the same DataDirectory;
+* on a clean shutdown (including SIGTERM) the supervised instance is stopped.
+
+If you would rather manage Tor yourself, `--tor-socks 127.0.0.1:9050` with a
+system tor works for clients, and the controller can sit behind any tunnel.
+
+## Controller dashboard
+
+With a terminal attached, the controller draws a live view: aggregate progress,
+one row per node sorted by throughput, and the same scrolling key log the
+standalone scan shows, tagged with the node that found each key.
+
+```
+ ZorpInvader controller │ q3uod25x….onion │ 12m34s
+ Coverage:  50.00%  Blocks: 2/4  Addresses: 512/1024  Rate: 61.2k/s  ETA: 39s
+ Clients: 4  Inflight: 4  Partial: 0  Hits: 1  Keys: 2
+──────────────────────────────────────────────────────────────────────────────
+ NODE             BLOCK                  PROG   BAR               PPS   HITS  KEYS IDLE
+ node-alpha       10.9.1.0/24             28.1% [███·······]     14.1k      0     0   3s
+ node-beta        10.9.3.0/24             28.1% [███·······]     13.9k      0     0   3s
+──────────────────────────────────────────────────────────────────────────────
+[  KEY LOG  ]
+  00:49:27  EXAMPLEKEY_a…2345             stripe       node-alpha       10.9.0.7
+  00:49:27  EXAMPLEKEY_b…6789             github       node-beta        10.9.1.42
+──────────────────────────────────────────────────────────────────────────────
+ attach: zorpinvader --client http://q3uod….onion --token …
+```
+
+Clients report telemetry every 5 seconds (block, position, rate, hits, keys);
+the controller redraws every second. Without a terminal — systemd, a log file —
+the same information is printed as periodic plain lines instead.
+
 ## Output
 
 Confirmed keys are written to `found_keys.csv`:
@@ -244,7 +340,9 @@ src/
 │   ├── protocol.rs      # JSON wire format
 │   ├── http.rs          # minimal HTTP/1.1 server
 │   ├── server.rs        # controller: handlers around the scheduler
-│   ├── client.rs        # client loop (curl transport)
+│   ├── client.rs        # client loop (curl transport, SOCKS5 for .onion)
+│   ├── tor.rs           # supervised tor: onion service + SOCKS5
+│   ├── dashboard.rs     # multi-node live view + shared key log
 │   └── local.rs         # standalone mode, same scheduler in-process
 ├── engine/              # Scan unit
 │   ├── scan_unit.rs     # ScanEngine: adapter + pipeline, one block at a time

@@ -123,6 +123,9 @@ pub struct ClaimResponse {
 // Progress
 // ---------------------------------------------------------------------------
 
+/// Client telemetry. Sent every few seconds; this is what the controller's
+/// dashboard renders, so it carries enough for a live per-node view rather than
+/// only the scheduler's bookkeeping.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProgressRequest {
     pub client_id: String,
@@ -133,6 +136,19 @@ pub struct ProgressRequest {
     pub syns: u64,
     #[serde(default)]
     pub synacks: u64,
+    /// Probes in the current block.
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub hits: u64,
+    #[serde(default)]
+    pub keys: u64,
+    /// Client-measured packets per second.
+    #[serde(default)]
+    pub rate: f64,
+    /// Current block, for display (e.g. `10.4.5.0/24`).
+    #[serde(default)]
+    pub block: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -220,6 +236,16 @@ pub struct ClientSnapshot {
     pub syns: u64,
     pub synacks: u64,
     pub idle_s: u64,
+    #[serde(default)]
+    pub block: String,
+    #[serde(default)]
+    pub pos: u64,
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub hits: u64,
+    #[serde(default)]
+    pub keys: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -14,11 +14,13 @@ use parking_lot::Mutex;
 
 use crate::main_mod::conf::{self, Zorp};
 
+use super::dashboard::{self, Dashboard};
 use super::http::{self, Request};
 use super::plan::Plan;
 use super::protocol::*;
-use super::scheduler::{Claim, Options, Scheduler};
+use super::scheduler::{Claim, ConnectionInfo, Options, Scheduler};
 use super::set4;
+use super::tor::{self, TorConfig, TorMode};
 
 /// Concurrent connection cap. Clients are few and their requests are short.
 const MAX_CONNECTIONS: usize = 64;
@@ -75,7 +77,7 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         reset: zorp.reset_state,
     };
 
-    let scheduler = match Scheduler::load_or_create(plan.clone(), opts) {
+    let mut scheduler = match Scheduler::load_or_create(plan.clone(), opts) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("ERROR: {}", e);
@@ -96,6 +98,53 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         return 1;
     }
 
+    // Publish over tor when asked. The onion address is part of the progress
+    // file, so a worker can be started from that file alone.
+    let tor_cfg = TorConfig {
+        mode: if zorp.tor { TorMode::Required } else { TorMode::Off },
+        binary: zorp.tor_binary.clone(),
+        socks: None,
+        data_dir: zorp.tor_dir.clone().unwrap_or_else(|| {
+            let parent = zorp
+                .state_file
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            parent.join("tor")
+        }),
+        timeout: Duration::from_secs(zorp.tor_timeout),
+    };
+    let mut tor_handle = if zorp.tor {
+        match tor::start_server(zorp.server_port, &tor_cfg) {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                eprintln!("ERROR: {}", e);
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+
+    let listen = format!("{}:{}", zorp.server_bind, zorp.server_port);
+    let onion = tor_handle.as_ref().and_then(|t| t.onion.clone());
+    let url = match &onion {
+        Some(onion) => format!("http://{}", onion),
+        None => format!("http://{}:{}", display_host(&zorp.server_bind), zorp.server_port),
+    };
+    let connection = ConnectionInfo {
+        listen: listen.clone(),
+        onion: onion.clone(),
+        url: url.clone(),
+        token: token.clone(),
+        connect: format!("zorpinvader --client {} --token {}", url, token),
+    };
+    scheduler.set_connection(connection.clone());
+    if let Err(e) = scheduler.save() {
+        eprintln!("[state] save failed: {}", e);
+    }
+
     let app = Arc::new(AppState {
         sched: Mutex::new(scheduler),
         token: token.clone(),
@@ -104,7 +153,7 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         live_connections: AtomicUsize::new(0),
     });
 
-    print_banner(&plan, &bind_addr, &token, zorp.lease_s);
+    print_banner(&plan, &bind_addr, &token, zorp.lease_s, &connection, &zorp.state_file);
 
     let stop = Arc::new(AtomicBool::new(false));
     {
@@ -118,6 +167,13 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
     let mut last_tick = Instant::now();
     let mut last_save = Instant::now();
     let mut last_status = Instant::now();
+    let mut dashboard = Dashboard::new();
+    let interactive = dashboard::stderr_is_tty();
+    let status_interval = if interactive {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(15)
+    };
 
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -153,14 +209,18 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
             app.sched.lock().reap();
         }
 
-        let status_interval = if stderr_is_tty() {
-            TICK
-        } else {
-            Duration::from_secs(15)
-        };
         if last_status.elapsed() >= status_interval {
             last_status = Instant::now();
-            print_status(&mut *app.sched.lock());
+            // Take a snapshot under the lock, then draw outside it.
+            let (status, keys) = {
+                let mut sched = app.sched.lock();
+                (sched.status(), sched.key_events().clone())
+            };
+            if interactive {
+                dashboard.render(&status, Some(&connection), &keys);
+            } else {
+                dashboard.render_plain(&status, Some(&connection));
+            }
         }
 
         if last_save.elapsed() >= SAVE_INTERVAL {
@@ -182,10 +242,29 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         }
         print_final(&sched);
     }
+    // Stop the tor we started; a supervised instance must not outlive us.
+    if let Some(handle) = tor_handle.as_mut() {
+        handle.stop();
+    }
     0
 }
 
-fn print_banner(plan: &Plan, bind_addr: &str, token: &str, lease_s: u64) {
+/// A bind address of `0.0.0.0` is not something a client can dial.
+fn display_host(bind: &str) -> String {
+    match bind {
+        "0.0.0.0" | "::" | "" => "127.0.0.1".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn print_banner(
+    plan: &Plan,
+    bind_addr: &str,
+    token: &str,
+    lease_s: u64,
+    connection: &ConnectionInfo,
+    state_path: &std::path::Path,
+) {
     eprintln!("ZorpInvader controller {} — {}", conf::VERSION, bind_addr);
     eprintln!("  ports          {}", plan.ports);
     eprintln!(
@@ -200,53 +279,26 @@ fn print_banner(plan: &Plan, bind_addr: &str, token: &str, lease_s: u64) {
     );
     eprintln!("  lease          {}s", lease_s);
     eprintln!("  auth token     {}", token);
+    match &connection.onion {
+        Some(onion) => eprintln!("  onion          {}", onion),
+        None => eprintln!("  onion          (not published; pass --tor)"),
+    }
+    eprintln!("  progress file  {}", state_path.display());
     eprintln!("  endpoints      {}", PATH_CLAIM);
     eprintln!("                 {}  (human-readable status)", PATH_STATUS);
-    eprintln!("  clients:");
-    eprintln!(
-        "    zorpinvader --client http://<this-host>/ --token {}",
-        token
-    );
-    eprintln!("  Behind TLS, use the public URL instead of http://.");
+    eprintln!("  connect a worker:");
+    eprintln!("    {}", connection.connect);
+    eprintln!("  Progress, token and onion address are in the progress file:");
+    eprintln!("    cat {}", state_path.display());
     eprintln!();
-}
-
-fn stderr_is_tty() -> bool {
-    unsafe { libc::isatty(libc::STDERR_FILENO) == 1 }
-}
-
-fn print_status(sched: &mut Scheduler) {
-    let status = sched.status();
-    let eta = format_eta(status.eta_s);
-    let clients = status
-        .clients
-        .iter()
-        .filter(|c| c.idle_s < 90)
-        .count() as u64;
-    let line = format!(
-        "[ctrl] {:>6}/{:<6} blocks {:>6.2}% | {:>5} clients {:>8.1}k pps | hits {:<6} keys {:<4} | eta {}",
-        status.blocks_done,
-        status.blocks_total,
-        status.percent,
-        clients,
-        status.rate_pps / 1000.0,
-        status.hits,
-        status.keys,
-        eta
-    );
-    use std::io::Write;
-    // A live status line needs a terminal; when stderr is a log file, emit plain
-    // lines occasionally instead of a river of carriage returns.
-    if stderr_is_tty() {
-        eprint!("\r\x1b[K{}", line);
-    } else {
-        eprintln!("{}", line);
-    }
-    let _ = std::io::stderr().flush();
 }
 
 fn print_final(sched: &Scheduler) {
     let coverage = sched.coverage();
+    match sched.connection() {
+        Some(conn) => eprintln!("[ctrl] worker command: {}", conn.connect),
+        None => {}
+    }
     eprintln!(
         "\n[ctrl] {} of {} addresses covered ({:.2}%), {} blocks done, {} partial, {} in flight",
         coverage.addresses_done,
@@ -446,6 +498,11 @@ fn handle_progress(request: &Request, app: &AppState) -> (u16, String) {
         body.pos,
         body.syns,
         body.synacks,
+        body.total,
+        body.hits,
+        body.keys,
+        body.rate,
+        &body.block,
     );
     (
         200,

@@ -115,7 +115,18 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         let outcome = engine.scan_block(&job, &cancel, &mut |progress| {
             // Keep the scheduler's lease and aggregate counters current, exactly
             // as a remote client's progress reports would.
-            scheduler.progress("local", job.job_id, progress.pos, progress.syns, progress.synacks);
+            scheduler.progress(
+                "local",
+                job.job_id,
+                progress.pos,
+                progress.syns,
+                progress.synacks,
+                progress.total,
+                progress.hits,
+                0,
+                0.0,
+                &job.cidr,
+            );
 
             if progress.syns > 0 {
                 let (then, syns_then) = last_sample;

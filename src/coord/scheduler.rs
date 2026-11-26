@@ -16,7 +16,7 @@
 //!   block back after the lease expires, resuming where it stopped, so a dead
 //!   machine costs at most one lease interval of duplicated work.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -67,6 +67,27 @@ pub struct JobSpec {
     pub tpc: usize,
 }
 
+/// One confirmed key, as shown in the controller's key log.
+#[derive(Clone, Debug)]
+pub struct KeyEvent {
+    pub at: String,
+    pub key: String,
+    pub provider: String,
+    pub client: String,
+    pub ip: String,
+}
+
+/// How clients reach this controller. Written into the progress file so a worker
+/// can be started by copying one line out of it.
+#[derive(Clone, Debug, Default)]
+pub struct ConnectionInfo {
+    pub listen: String,
+    pub onion: Option<String>,
+    pub url: String,
+    pub token: String,
+    pub connect: String,
+}
+
 #[derive(Clone, Debug)]
 pub enum Claim {
     Job(Box<JobSpec>),
@@ -100,6 +121,12 @@ struct ClientEntry {
     pps: f64,
     syns: u64,
     synacks: u64,
+    /// Telemetry for the dashboard, reported by the client.
+    block: String,
+    pos: u64,
+    total: u64,
+    hits: u64,
+    keys: u64,
 }
 
 /// Durable slice of a scheduler.
@@ -119,6 +146,16 @@ struct StateFile {
     inflight: Vec<(u64, u64, String)>,
     syns: u64,
     synacks: u64,
+    #[serde(default)]
+    onion: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    listen: String,
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
+    connect: String,
 }
 
 pub struct Scheduler {
@@ -138,6 +175,9 @@ pub struct Scheduler {
     dirty: bool,
     rate_pps: f64,
     last_rate_sample: (Instant, u64),
+    connection: Option<ConnectionInfo>,
+    keys_log: VecDeque<KeyEvent>,
+    key_log_cap: usize,
 }
 
 impl Scheduler {
@@ -167,6 +207,9 @@ impl Scheduler {
             dirty: false,
             rate_pps: 0.0,
             last_rate_sample: (Instant::now(), 0),
+            connection: None,
+            keys_log: VecDeque::new(),
+            key_log_cap: 200,
         };
 
         if scheduler.opts.state_path.exists() {
@@ -278,6 +321,31 @@ impl Scheduler {
                 .collect(),
             syns: self.stats.syns,
             synacks: self.stats.synacks,
+            onion: self
+                .connection
+                .as_ref()
+                .and_then(|c| c.onion.clone())
+                .unwrap_or_default(),
+            url: self
+                .connection
+                .as_ref()
+                .map(|c| c.url.clone())
+                .unwrap_or_default(),
+            listen: self
+                .connection
+                .as_ref()
+                .map(|c| c.listen.clone())
+                .unwrap_or_default(),
+            token: self
+                .connection
+                .as_ref()
+                .map(|c| c.token.clone())
+                .unwrap_or_default(),
+            connect: self
+                .connection
+                .as_ref()
+                .map(|c| c.connect.clone())
+                .unwrap_or_default(),
         };
 
         let body = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
@@ -291,12 +359,38 @@ impl Scheduler {
         std::fs::write(&tmp, body).map_err(|e| format!("{}: {}", tmp.display(), e))?;
         std::fs::rename(&tmp, &self.opts.state_path)
             .map_err(|e| format!("{}: {}", self.opts.state_path.display(), e))?;
+        // The progress file holds the control token once a controller publishes
+        // itself; keep it private.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                &self.opts.state_path,
+                std::fs::Permissions::from_mode(0o600),
+            );
+        }
         self.dirty = false;
         Ok(())
     }
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// Record how clients should reach this controller. Saved with the state so
+    /// the progress file alone is enough to start a worker.
+    pub fn set_connection(&mut self, info: ConnectionInfo) {
+        self.connection = Some(info);
+        self.dirty = true;
+    }
+
+    pub fn connection(&self) -> Option<&ConnectionInfo> {
+        self.connection.as_ref()
+    }
+
+    /// Most recent confirmed keys, oldest first.
+    pub fn key_events(&self) -> &VecDeque<KeyEvent> {
+        &self.keys_log
     }
 
     // -----------------------------------------------------------------------
@@ -356,8 +450,16 @@ impl Scheduler {
                 pps: 0.0,
             },
         );
+        let block = self.plan.block(id);
         if let Some(entry) = self.clients.get_mut(client) {
             entry.job = Some(id);
+            entry.block = block.map(|b| b.cidr()).unwrap_or_default();
+            entry.pos = pos;
+            entry.total = block
+                .map(|b| b.len().saturating_mul(self.plan.ports_count()))
+                .unwrap_or(0);
+            entry.hits = 0;
+            entry.keys = 0;
         }
         self.dirty = true;
     }
@@ -379,6 +481,8 @@ impl Scheduler {
     }
 
     /// Record client progress and renew its lease.
+    /// Record client telemetry and renew its lease.
+    #[allow(clippy::too_many_arguments)]
     pub fn progress(
         &mut self,
         client_id: &str,
@@ -386,6 +490,11 @@ impl Scheduler {
         pos: u64,
         syns: u64,
         synacks: u64,
+        total: u64,
+        hits: u64,
+        keys: u64,
+        rate: f64,
+        block: &str,
     ) -> (f64, bool) {
         self.touch(client_id);
         let now = Instant::now();
@@ -429,7 +538,8 @@ impl Scheduler {
                     entry.reported_synacks = synacks;
                 }
 
-                pps = entry.pps;
+                pps = if rate > 0.0 { rate } else { entry.pps };
+                entry.pps = pps;
                 reporting = true;
             }
         }
@@ -441,6 +551,15 @@ impl Scheduler {
                 client.syns += delta_syns;
                 client.synacks += delta_synacks;
                 client.pps = pps;
+                if total > 0 {
+                    client.total = total;
+                }
+                client.pos = pos;
+                client.hits = client.hits.max(hits);
+                client.keys = client.keys.max(keys);
+                if !block.is_empty() {
+                    client.block = block.to_string();
+                }
             }
             if delta_syns > 0 {
                 self.dirty = true;
@@ -499,6 +618,31 @@ impl Scheduler {
 
         let (accepted_hits, dup_hits) = self.results.add_hits(client_id, job_id, hits);
         let (accepted_keys, dup_keys) = self.results.add_keys(keys);
+
+        if accepted_keys > 0 {
+            let name = self
+                .clients
+                .get(client_id)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| client_id.to_string());
+            for key in keys {
+                let seen = self.key_events().iter().any(|e| e.key == key.key);
+                if seen {
+                    continue;
+                }
+                let event = KeyEvent {
+                    at: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    key: key.key.clone(),
+                    provider: key.provider.clone(),
+                    client: name.clone(),
+                    ip: key.ip.clone(),
+                };
+                self.keys_log.push_back(event);
+                while self.keys_log.len() > self.key_log_cap {
+                    self.keys_log.pop_front();
+                }
+            }
+        }
         if accepted_hits > 0 || accepted_keys > 0 {
             self.dirty = true;
         }
@@ -620,6 +764,11 @@ impl Scheduler {
             pps: 0.0,
             syns: 0,
             synacks: 0,
+            block: String::new(),
+            pos: 0,
+            total: 0,
+            hits: 0,
+            keys: 0,
         });
         entry.last_seen = Instant::now();
     }
@@ -632,6 +781,11 @@ impl Scheduler {
             pps: 0.0,
             syns: 0,
             synacks: 0,
+            block: String::new(),
+            pos: 0,
+            total: 0,
+            hits: 0,
+            keys: 0,
         });
         entry.name = name.to_string();
         entry.last_seen = Instant::now();
@@ -749,6 +903,11 @@ impl Scheduler {
                 syns: c.syns,
                 synacks: c.synacks,
                 idle_s: c.last_seen.elapsed().as_secs(),
+                block: c.block.clone(),
+                pos: c.pos,
+                total: c.total,
+                hits: c.hits,
+                keys: c.keys,
             })
             .collect();
         clients.sort_by(|a, b| b.pps.partial_cmp(&a.pps).unwrap_or(std::cmp::Ordering::Equal));
@@ -894,7 +1053,7 @@ mod tests {
             sched.complete("c1", j.job_id, 0, 0, 0).unwrap();
             // Lease a second block but never finish it.
             let j2 = job_of(sched.claim("c1"));
-            sched.progress("c1", j2.job_id, 512, 1000, 12);
+            sched.progress("c1", j2.job_id, 512, 1000, 12, 0, 0, 0, 0.0, "");
             sched.save().unwrap();
         }
 
@@ -916,7 +1075,7 @@ mod tests {
         let mut sched = Scheduler::load_or_create(plan, opts(&dir)).unwrap();
 
         let j = job_of(sched.claim("c1"));
-        sched.progress("c1", j.job_id, 300, 10, 1);
+        sched.progress("c1", j.job_id, 300, 10, 1, 0, 0, 0, 0.0, "");
         std::thread::sleep(Duration::from_millis(1200));
         sched.reap();
 
@@ -924,7 +1083,7 @@ mod tests {
         assert_eq!(again.job_id, j.job_id);
         assert_eq!(again.resume_pos, 300);
         // The old client is told to stop.
-        let (_rate, cancel) = sched.progress("c1", j.job_id, 400, 20, 2);
+        let (_rate, cancel) = sched.progress("c1", j.job_id, 400, 20, 2, 0, 0, 0, 0.0, "");
         assert!(cancel);
         let _ = std::fs::remove_dir_all(&dir);
     }

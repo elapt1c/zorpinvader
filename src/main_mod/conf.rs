@@ -488,6 +488,21 @@ pub struct Zorp {
 
     /// Seconds a block stays leased without a progress report.
     pub lease_s: u64,
+
+    /// Publish the controller on an onion service / force tor for a client.
+    pub tor: bool,
+
+    /// Explicit SOCKS endpoint to use instead of starting tor.
+    pub tor_socks: Option<String>,
+
+    /// Explicit tor binary.
+    pub tor_binary: Option<PathBuf>,
+
+    /// Where tor keeps its DataDirectory (default: next to the progress file).
+    pub tor_dir: Option<PathBuf>,
+
+    /// Seconds to wait for tor to bootstrap.
+    pub tor_timeout: u64,
 }
 
 impl Default for Zorp {
@@ -563,10 +578,15 @@ impl Default for Zorp {
             token: None,
             client_url: String::new(),
             client_name: None,
-            state_file: PathBuf::from("zorp-state.json"),
+            state_file: PathBuf::from("zorpinvader.progress"),
             results_dir: PathBuf::from("."),
             job_size: 0,
             lease_s: 180,
+            tor: false,
+            tor_socks: None,
+            tor_binary: None,
+            tor_dir: None,
+            tor_timeout: 180,
         }
     }
 }
@@ -1205,6 +1225,31 @@ impl Zorp {
                 self.client_name = Some(value.to_string());
             }
 
+            "tor" | "onion" => {
+                self.tor = Self::parse_boolean(value);
+            }
+
+            "tor-socks" | "socks" => {
+                self.tor_socks = Some(value.to_string());
+            }
+
+            "tor-binary" | "tor-path" => {
+                self.tor_binary = Some(PathBuf::from(value));
+            }
+
+            "tor-dir" => {
+                self.tor_dir = Some(PathBuf::from(value));
+            }
+
+            "tor-timeout" => {
+                self.tor_timeout = value
+                    .parse()
+                    .map_err(|_| format!("tor-timeout: invalid number: {}", value))?;
+                if self.tor_timeout < 10 {
+                    return Err("tor-timeout: must be at least 10 seconds".to_string());
+                }
+            }
+
             "state" | "state-file" | "checkpoint" => {
                 self.state_file = PathBuf::from(value);
             }
@@ -1304,6 +1349,7 @@ impl Zorp {
                 | "reset"
                 | "fresh"
                 | "no-resume"
+                | "tor"
         )
     }
 
@@ -1385,11 +1431,24 @@ Distributed scanning:
     --client-name <name> Client name shown in the controller status (default: hostname)
     --job-size <addrs>   Addresses per block (default: automatic, keeps blocks ≤ 65536)
     --lease <seconds>    Lease before a silent client's block is reassigned (default: 180)
-    --state <file>       Scan state file (default: zorp-state.json)
+    --state <file>       Progress file: coverage, leases, onion address, token
+                         (default: zorpinvader.progress)
     --results-dir <dir>  Where results are written (default: current directory)
 
 A controller never transmits; clients need the raw-socket privileges. The
 controller speaks plain HTTP, so put it behind cloudflared/Caddy/nginx for TLS.
+
+Tor (no ports to open, no external proxy to configure):
+    --tor                Publish the controller on an onion service, or force a
+                         client to reach the controller through tor
+    --tor-socks <h:p>    Use an existing tor SOCKS proxy instead of starting one
+    --tor-binary <path>  Explicit tor binary (default: find tor in PATH)
+    --tor-dir <dir>      tor DataDirectory (default: next to the progress file)
+    --tor-timeout <s>    Bootstrap timeout (default: 180)
+
+A .onion address on --client implies tor; the onion address the controller
+publishes is written to the progress file together with a ready-to-run
+--client command.
 
 Parameters can be set via command-line or config file. To generate a
 config file from current settings:

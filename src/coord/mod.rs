@@ -38,12 +38,15 @@
 //! * [`scheduler`] — leases, coverage accounting, state file, results de-dupe.
 //! * [`protocol`] — the JSON wire format.
 //! * [`http`] — a minimal HTTP/1.1 server.
+//! * [`tor`] — supervised tor: onion service for the controller, SOCKS5 for clients.
+//! * [`dashboard`] — the multi-node live view, including the shared key log.
 //! * [`server`] — the controller: HTTP handlers around a [`scheduler::Scheduler`].
 //! * [`client`] — the client loop: join → claim → scan → report.
 //! * [`local`] — standalone mode: the same scheduler, in-process.
 //! * [`targets`] — collect the target set from a [`Zorp`] config.
 
 pub mod client;
+pub mod dashboard;
 pub mod http;
 pub mod local;
 pub mod plan;
@@ -53,7 +56,8 @@ pub mod scheduler;
 pub mod server;
 pub mod set4;
 pub mod targets;
+pub mod tor;
 
 pub use plan::Plan;
-pub use scheduler::{Claim, JobSpec, Scheduler};
+pub use scheduler::{Claim, ConnectionInfo, JobSpec, Scheduler};
 pub use set4::RangeSet4;
