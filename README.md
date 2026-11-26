@@ -351,6 +351,22 @@ So ZorpInvader supervises a real `tor`:
 If you would rather manage Tor yourself, `--tor-socks 127.0.0.1:9050` with a
 system tor works for clients, and the controller can sit behind any tunnel.
 
+### Tor won't start
+
+Two things trip it up in practice:
+
+* **sudo.** A controller needs no privileges — it never transmits packets. Under
+  sudo, tor's DataDirectory (next to the progress file) is a root-owned project
+  directory, and AppArmor's `tor` profile on Ubuntu/Debian only permits
+  `/var/lib/tor`, `/var/log/tor` and `~/.tor`. Run it as your normal user.
+* **A blocked network.** Tor stalling at 0–10% means it cannot reach the network,
+  not that the tool is broken. Use a bridge, or point at a working tor with
+  `--tor-socks`.
+
+When tor fails, the controller prints tor's own stderr (the actual reason), the
+last bootstrap line, recent warnings and the path of both logs. `--tor-timeout
+600` for slow links; `--tor-dir <dir>` to move the DataDirectory.
+
 ## Controller dashboard
 
 With a terminal attached, the controller draws a live view: aggregate progress,

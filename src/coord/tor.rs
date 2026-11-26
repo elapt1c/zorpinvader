@@ -109,6 +109,9 @@ struct ManagedTor {
     child: Child,
     pidfile: PathBuf,
     logfile: PathBuf,
+    /// tor's stderr. Startup failures ("permission denied", AppArmor denials,
+    /// bad config) land here, not in tor.log.
+    errfile: PathBuf,
 }
 
 impl ManagedTor {
@@ -142,7 +145,9 @@ pub fn start_server(listen_port: u16, cfg: &TorConfig) -> Result<TorHandle, Stri
 
     let hs_dir = data_dir.join("hidden_service");
     let logfile = data_dir.join("tor.log");
+    let errfile = data_dir.join("tor.stderr.log");
     let _ = std::fs::remove_file(&logfile);
+    let _ = std::fs::remove_file(&errfile);
     if let Some(parent) = hs_dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -166,21 +171,22 @@ pub fn start_server(listen_port: u16, cfg: &TorConfig) -> Result<TorHandle, Stri
         .arg("0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        // Nothing drains a pipe here: tor logging to a pipe nobody reads
-        // eventually blocks the process, which looks exactly like a bootstrap
-        // hang. It writes to tor.log instead.
-        .stderr(Stdio::null());
+        // Never a pipe: nothing reads it, and a full pipe blocks tor, which
+        // looks exactly like a bootstrap hang. A file keeps the early fatal
+        // errors ("permission denied", AppArmor, bad torrc) without that.
+        .stderr(stderr_to_file(&errfile)?);
 
     let child = spawn(cmd, &binary)?;
     let pidfile = write_pidfile(&data_dir, child.id())?;
-    let managed = ManagedTor {
+    let mut managed = ManagedTor {
         child,
         pidfile,
         logfile: logfile.clone(),
+        errfile: errfile.clone(),
     };
 
     eprintln!("[tor] publishing hidden service on 127.0.0.1:{}", listen_port);
-    wait_for_bootstrap(&managed, cfg.timeout)?;
+    wait_for_bootstrap(&mut managed, cfg.timeout)?;
 
     let hostname_path = hs_dir.join("hostname");
     let onion = wait_for_hostname(&hostname_path, cfg.timeout)?;
@@ -233,7 +239,9 @@ pub fn start_client(cfg: &TorConfig) -> Result<TorHandle, String> {
     set_private_dir(&data_dir);
 
     let logfile = data_dir.join("tor.log");
+    let errfile = data_dir.join("tor.stderr.log");
     let _ = std::fs::remove_file(&logfile);
+    let _ = std::fs::remove_file(&errfile);
     let socks_port = free_port()?;
 
     let mut cmd = Command::new(&binary);
@@ -247,14 +255,15 @@ pub fn start_client(cfg: &TorConfig) -> Result<TorHandle, String> {
         .arg("1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr_to_file(&errfile)?);
 
     let child = spawn(cmd, &binary)?;
     let pidfile = write_pidfile(&data_dir, child.id())?;
-    let managed = ManagedTor {
+    let mut managed = ManagedTor {
         child,
         pidfile,
         logfile: logfile.clone(),
+        errfile: errfile.clone(),
     };
 
     eprintln!(
@@ -263,7 +272,7 @@ pub fn start_client(cfg: &TorConfig) -> Result<TorHandle, String> {
         socks_port,
         data_dir.display()
     );
-    wait_for_bootstrap(&managed, cfg.timeout)?;
+    wait_for_bootstrap(&mut managed, cfg.timeout)?;
 
     Ok(TorHandle {
         onion: None,
@@ -277,7 +286,36 @@ pub fn start_client(cfg: &TorConfig) -> Result<TorHandle, String> {
 // Internals
 // ---------------------------------------------------------------------------
 
+/// tor's stderr as a file: captured for diagnostics, but never a pipe nobody
+/// drains (a full pipe blocks tor and looks exactly like a bootstrap hang).
+fn stderr_to_file(path: &Path) -> Result<Stdio, String> {
+    let file = std::fs::File::create(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+    Ok(Stdio::from(file))
+}
+
 fn spawn(mut cmd: Command, binary: &Path) -> Result<Child, String> {
+    // Preflight: a tor that cannot even print its version will never bootstrap,
+    // and 180 seconds of waiting is a terrible way to learn that.
+    match Command::new(binary).arg("--version").output() {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            return Err(format!(
+                "{} --version failed ({}): {}",
+                binary.display(),
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+        Err(e) => {
+            return Err(format!(
+                "cannot execute {}: {}. If tor is installed but not runnable as this \
+                 user (AppArmor, noexec mount), point at it with --tor-binary.",
+                binary.display(),
+                e
+            ))
+        }
+    }
+
     cmd.spawn()
         .map_err(|e| format!("cannot start {}: {}", binary.display(), e))
 }
@@ -378,11 +416,17 @@ fn reap_stale_tor(data_dir: &Path) {
 }
 
 /// Wait until tor reports a complete bootstrap, surfacing progress on stderr.
-fn wait_for_bootstrap(managed: &ManagedTor, timeout: Duration) -> Result<(), String> {
+fn wait_for_bootstrap(managed: &mut ManagedTor, timeout: Duration) -> Result<(), String> {
     let started = Instant::now();
     let mut last_pct = 0u64;
 
     while started.elapsed() < timeout {
+        // `try_wait` is the only reliable liveness check: an exited child is a
+        // zombie until reaped, and a zombie still has a /proc entry.
+        if let Ok(Some(status)) = managed.child.try_wait() {
+            return Err(bootstrap_failure(managed, Some(status), timeout));
+        }
+
         if let Ok(text) = std::fs::read_to_string(&managed.logfile) {
             if text.contains("Bootstrapped 100%") {
                 if is_tty() {
@@ -400,63 +444,90 @@ fn wait_for_bootstrap(managed: &ManagedTor, timeout: Duration) -> Result<(), Str
                     }
                 }
             }
-            for marker in ["Problem bootstrapping", "Fatal", "Could not bind"] {
-                if let Some(line) = text.lines().find(|l| l.contains(marker)) {
-                    return Err(format!("tor failed: {}", line.trim()));
-                }
-            }
         }
 
-        if !process_alive(managed.child.id()) {
-            return Err(format!(
-                "tor exited during bootstrap; see {}",
-                managed.logfile.display()
-            ));
-        }
         std::thread::sleep(Duration::from_millis(250));
     }
 
-    let detail = bootstrap_diagnosis(&managed.logfile);
-    Err(format!(
-        "tor did not bootstrap within {}s.\n{}\nFull log: {}\n\
-         If the network blocks Tor, use a bridge or --tor-socks with an existing \
-         tor; a slow link may need --tor-timeout 600.",
-        timeout.as_secs(),
-        detail,
-        managed.logfile.display()
-    ))
+    Err(bootstrap_failure(managed, None, timeout))
 }
 
-/// Last thing tor said before it stalled, so the failure is actionable.
-fn bootstrap_diagnosis(logfile: &Path) -> String {
-    let text = std::fs::read_to_string(logfile).unwrap_or_default();
-    if text.trim().is_empty() {
-        return "tor produced no log output at all (did it start?)".to_string();
-    }
+/// Everything we know about why tor did not come up.
+fn bootstrap_failure(
+    managed: &ManagedTor,
+    status: Option<std::process::ExitStatus>,
+    timeout: Duration,
+) -> String {
+    let mut out = match status {
+        Some(status) => format!("tor exited during startup ({})", status),
+        None => format!("tor did not bootstrap within {}s", timeout.as_secs()),
+    };
 
-    let mut progress = String::from("no bootstrap progress reported");
-    let mut warnings: Vec<String> = Vec::new();
-    for line in text.lines() {
-        if let Some(idx) = line.find("Bootstrapped ") {
-            progress = line[idx..].trim().to_string();
-        }
-        if line.contains("[warn]") || line.contains("[err]") {
-            warnings.push(line.trim().to_string());
-        }
-    }
-
-    let mut out = format!("last progress: {}", progress);
-    if !warnings.is_empty() {
-        out.push_str("\nrecent tor warnings:");
-        for line in warnings.iter().rev().take(5).rev() {
+    // Startup failures — permission denied, an AppArmor denial, a bad torrc —
+    // go to stderr, not tor.log. Showing them is the difference between "it
+    // didn't work" and a fixable error.
+    let stderr = std::fs::read_to_string(&managed.errfile).unwrap_or_default();
+    let stderr_tail: Vec<&str> = stderr
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .rev()
+        .take(6)
+        .collect();
+    if stderr_tail.is_empty() {
+        out.push_str("\ntor printed nothing on stderr");
+    } else {
+        out.push_str("\ntor said:");
+        for line in stderr_tail.iter().rev() {
             out.push_str(&format!("\n  {}", line));
         }
     }
-    out
-}
 
-fn process_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{}", pid)).exists()
+    let log = std::fs::read_to_string(&managed.logfile).unwrap_or_default();
+    let mut progress = None;
+    let mut warnings: Vec<&str> = Vec::new();
+    for line in log.lines() {
+        if let Some(idx) = line.find("Bootstrapped ") {
+            progress = Some(line[idx..].trim());
+        }
+        if line.contains("[warn]") || line.contains("[err]") {
+            warnings.push(line.trim());
+        }
+    }
+    if let Some(progress) = progress {
+        out.push_str(&format!("\nlast progress: {}", progress));
+    }
+    if !warnings.is_empty() {
+        out.push_str("\nrecent tor warnings:");
+        for line in warnings.iter().rev().take(4).rev() {
+            out.push_str(&format!("\n  {}", line));
+        }
+    }
+
+    out.push_str(&format!(
+        "\nlogs: {} and {}",
+        managed.logfile.display(),
+        managed.errfile.display()
+    ));
+
+    // AppArmor's tor profile (Ubuntu/Debian) attaches to /usr/bin/tor whatever
+    // the user, and only allows writes under /var/lib/tor and ~/.tor. Running
+    // under sudo points DataDirectory at a project directory instead, which is
+    // denied — and the controller never needed root in the first place.
+    if unsafe { libc::geteuid() } == 0 {
+        out.push_str(
+            "\nnote: running as root. A controller needs no privileges (it never \
+             transmits packets), and AppArmor's tor profile commonly denies tor \
+             writing to a project directory. Try the same command without sudo, \
+             or point --tor-dir at a location tor may write.",
+        );
+    }
+    if status.is_none() {
+        out.push_str(
+            "\nIf the network blocks Tor, use a bridge or --tor-socks with a working \
+             tor; a slow link may need --tor-timeout 600.",
+        );
+    }
+    out
 }
 
 fn last_bootstrap_percent(log: &str) -> Option<u64> {

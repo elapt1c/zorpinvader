@@ -133,6 +133,13 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         }),
         timeout: Duration::from_secs(zorp.tor_timeout),
     };
+    if zorp.tor && unsafe { libc::geteuid() } == 0 {
+        eprintln!(
+            "[tor] note: a controller needs no root. If tor fails to start, run \
+             this without sudo (AppArmor's tor profile often denies writes to a \
+             project directory)."
+        );
+    }
     let mut tor_handle = if zorp.tor {
         match tor::start_server(listen_port, &tor_cfg) {
             Ok(handle) => Some(handle),
