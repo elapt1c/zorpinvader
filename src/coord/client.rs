@@ -39,11 +39,9 @@ const HTTP_ATTEMPTS: usize = 3;
 /// interrupts it.
 pub fn run(zorp: Arc<Zorp>) -> i32 {
     let (base, is_onion) = normalize_url(&zorp.client_url);
-    let token = zorp.token.clone().unwrap_or_default();
-    if token.is_empty() {
-        eprintln!("ERROR: --client requires --token <token> (the controller prints it on start)");
-        return 1;
-    }
+    // No token is the normal case: the controller is open and the address is
+    // the way in. --token is only for controllers that ask for one.
+    let token = zorp.token.clone().filter(|t| !t.trim().is_empty());
 
     // `.onion` implies tor; anything else only goes through tor when asked.
     let mut tor_handle = if is_onion || zorp.tor {
@@ -163,6 +161,7 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
             Some((code, body)) => {
                 eprintln!("[client] claim rejected ({}): {}", code, body);
                 if code == 401 {
+                    eprintln!("[client] this controller requires a token: pass --token <token>");
                     exit_code = 1;
                     break;
                 }
@@ -479,8 +478,12 @@ fn join(
             },
             Some((code, body)) => {
                 eprintln!("[client] join rejected ({}): {}", code, body);
-                if code == 401 || code == 400 {
-                    // Wrong token or version: retrying will not help.
+                if code == 401 {
+                    eprintln!("[client] this controller requires a token: pass --token <token>");
+                    return None;
+                }
+                if code == 400 {
+                    // Version mismatch or malformed request: retrying will not help.
                     return None;
                 }
             }
@@ -508,7 +511,8 @@ fn post_results(transport: &Transport, results: &ResultsRequest) -> bool {
 #[derive(Clone)]
 struct Transport {
     base: String,
-    token: String,
+    /// `None` for an open controller.
+    token: Option<String>,
     /// SOCKS5 proxy for `.onion` targets.
     socks: Option<String>,
 }
@@ -540,7 +544,6 @@ impl Transport {
 
     fn post<T: serde::Serialize>(&self, path: &str, body: &T) -> Result<(u16, String), String> {
         let payload = serde_json::to_string(body).map_err(|e| e.to_string())?;
-        let auth = format!("Authorization: Bearer {}", self.token);
         let url = format!("{}{}", self.base, path);
 
         let mut args: Vec<String> = vec![
@@ -555,13 +558,15 @@ impl Transport {
             "Expect:".into(),
             "-H".into(),
             "Content-Type: application/json".into(),
-            "-H".into(),
-            auth,
             "--data-binary".into(),
             "@-".into(),
             "-w".into(),
             "\n%{http_code}".into(),
         ];
+        if let Some(token) = &self.token {
+            args.push("-H".into());
+            args.push(format!("Authorization: Bearer {}", token));
+        }
         if let Some(socks) = &self.socks {
             // `-hostname` makes the proxy resolve the name: an onion address is
             // never looked up locally, and no DNS leak can happen.

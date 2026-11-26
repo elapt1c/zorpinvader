@@ -35,7 +35,8 @@ type Handler = fn(&Request, &AppState) -> (u16, String);
 
 struct AppState {
     sched: Mutex<Scheduler>,
-    token: String,
+    /// `None` means the controller is open to any worker.
+    token: Option<String>,
     version: String,
     started: Instant,
     live_connections: AtomicUsize,
@@ -62,10 +63,12 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
 
     let mut plan = Plan::new(&ports, targets, zorp.job_size, seed);
     plan.restrict_shard(zorp.shard.one, zorp.shard.of);
-    let token = match &zorp.token {
-        Some(t) if !t.trim().is_empty() => t.clone(),
-        _ => http::random_token(),
-    };
+    // Open by default: the address is the way in, like a room code. A token is
+    // opt-in for controllers that should not accept arbitrary workers.
+    let token = zorp
+        .token
+        .clone()
+        .filter(|t| !t.trim().is_empty());
     let opts = Options {
         state_path: zorp.state_file.clone(),
         results_dir: zorp.results_dir.clone(),
@@ -137,11 +140,14 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         listen: listen.clone(),
         onion: onion.clone(),
         url: url.clone(),
-        token: token.clone(),
+        token: token.clone().unwrap_or_default(),
         // A bare onion address is what a human copies; the scheme is optional.
-        connect: match &onion {
-            Some(onion) => format!("zorpinvader --client {} --token {}", onion, token),
-            None => format!("zorpinvader --client {} --token {}", url, token),
+        connect: {
+            let target = onion.clone().unwrap_or_else(|| url.clone());
+            match &token {
+                Some(token) => format!("zorpinvader --client {} --token {}", target, token),
+                None => format!("zorpinvader --client {}", target),
+            }
         },
     };
     scheduler.set_connection(connection.clone());
@@ -157,7 +163,14 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         live_connections: AtomicUsize::new(0),
     });
 
-    print_banner(&plan, &bind_addr, &token, zorp.lease_s, &connection, &zorp.state_file);
+    print_banner(
+        &plan,
+        &bind_addr,
+        token.as_deref(),
+        zorp.lease_s,
+        &connection,
+        &zorp.state_file,
+    );
 
     let stop = Arc::new(AtomicBool::new(false));
     {
@@ -277,7 +290,7 @@ fn primary_ipv4() -> Option<String> {
 fn print_banner(
     plan: &Plan,
     bind_addr: &str,
-    token: &str,
+    token: Option<&str>,
     lease_s: u64,
     connection: &ConnectionInfo,
     state_path: &std::path::Path,
@@ -295,7 +308,10 @@ fn print_banner(
         plan.chunk
     );
     eprintln!("  lease          {}s", lease_s);
-    eprintln!("  auth token     {}", token);
+    match token {
+        Some(token) => eprintln!("  auth           token {}", token),
+        None => eprintln!("  auth           open (any worker with the address can join)"),
+    }
     match &connection.onion {
         Some(onion) => eprintln!("  onion          {}", onion),
         None => eprintln!("  onion          (not published; pass --tor)"),
@@ -369,10 +385,12 @@ fn route(request: &Request, app: &AppState) -> (u16, String) {
         return (200, banner_text(app));
     }
 
-    match request.bearer() {
-        Some(token) if http::token_matches(&app.token, token) => {}
-        Some(_) => return (401, error_json("invalid token")),
-        None => return (401, error_json("missing bearer token")),
+    if let Some(expected) = &app.token {
+        match request.bearer() {
+            Some(token) if http::token_matches(expected, token) => {}
+            Some(_) => return (401, error_json("invalid token")),
+            None => return (401, error_json("this controller requires a token")),
+        }
     }
 
     for (method, path, handler) in ROUTES {

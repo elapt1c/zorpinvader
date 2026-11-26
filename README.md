@@ -83,7 +83,7 @@ sudo ./bin/zorpinvader --resume --rate 10000 -p 80,443
 | `--server-bind <ip>` | Controller listen address | `0.0.0.0` |
 | `--client <url>` | Join a controller and scan its blocks | — |
 | `--client-name <name>` | Client name in the controller status | hostname |
-| `--token <secret>` | Shared secret (controller generates one) | — |
+| `--token <secret>` | Optional shared secret; without it the controller is open | — |
 | `--lease <seconds>` | Lease on an unresponsive client's block | `180` |
 | `--tor` | Publish the controller on an onion service / force a client through tor | off |
 | `--tor-socks <h:p>` | Use an existing tor SOCKS proxy instead of starting one | auto (9050/9150) |
@@ -117,6 +117,25 @@ terminates the public endpoint (`cloudflared`, Caddy, nginx) and the client trus
 the system CA store. Nothing TLS-specific lives in this binary.
 
 ### How work is allocated
+
+It is a pull queue of leased CIDR blocks, one block per worker at a time:
+
+```
+worker                                    controller
+  │  POST /api/v1/claim  ───────────────▶  pick the next block, lease it
+  │  ◀───────────────  10.9.0.4/30, ports, rate share, resume offset
+  │  scan the block (shuffled order inside it)
+  │  POST /api/v1/progress (every 5s)  ─▶  renew lease, update dashboard
+  │  POST /api/v1/results               ▶  hits + keys, de-duplicated
+  │  POST /api/v1/complete              ▶  mark covered, free the lease
+  │  POST /api/v1/claim  ───────────────▶  next block …
+  │  ◀───────────────  {"done": true}      exit
+```
+
+No worker holds more than one block, nothing is assigned up front, and the
+controller never transmits. A worker that dies mid-block has its lease expire;
+the block is handed to the next worker that asks, resuming at the probe offset
+the dead worker last reported.
 
 * The target set is divided into **CIDR-aligned blocks** (`--job-size`, or
   automatically so a plan stays under 65,536 blocks).
@@ -225,18 +244,23 @@ with nothing but the address — no port to open, no tunnel, no certificates:
 
 ```bash
 # controller: publishes <56 chars>.onion and writes it to the progress file
-zorpinvader --server 8000 --tor -p 80,443 --rate 40000 --token "$TOKEN"
+zorpinvader --server 8000 --tor -p 80,443 --rate 40000
 
-# any worker, from anywhere
-zorpinvader --client q3uod25xuv32meewcju6awkxszr2pobzqum34itj27sz34lmxnwe7bad.onion --token "$TOKEN"
+# any worker, from anywhere — the address is the only argument needed
+zorpinvader --client q3uod25xuv32meewcju6awkxszr2pobzqum34itj27sz34lmxnwe7bad.onion
 ```
+
+The controller is **open by default**: whoever has the address can join, like a
+room code. If you want it private, start it with `--token SECRET` and pass the
+same `--token` to workers — an unauthenticated worker is then rejected with
+`401 this controller requires a token`.
 
 Everything a worker needs is in the progress file, so the controller can be
 started on one machine and a worker on another by copying one line:
 
 ```bash
 $ cat zorpinvader.progress | jq -r .connect
-zorpinvader --client q3uod….onion --token sk-…
+zorpinvader --client q3uod….onion
 ```
 
 The file also carries `onion`, `url`, `listen` and `token`, and is written `0600`
@@ -247,8 +271,8 @@ because of the token.
   "onion": "q3uod25xuv32meewcju6awkxszr2pobzqum34itj27sz34lmxnwe7bad.onion",
   "url": "http://q3uod….onion",
   "listen": "0.0.0.0:8000",
-  "token": "…",
-  "connect": "zorpinvader --client q3uod….onion --token …",
+  "token": "",
+  "connect": "zorpinvader --client q3uod….onion",
   "done": ["10.9.0.0/28"], "partial": [], "next_ptr": 4, "syns": 16
 }
 ```
@@ -302,9 +326,12 @@ standalone scan shows, tagged with the node that found each key.
   00:49:27  EXAMPLEKEY_a…2345             stripe       node-alpha       10.9.0.7
   00:49:27  EXAMPLEKEY_b…6789             github       node-beta        10.9.1.42
 ──────────────────────────────────────────────────────────────────────────────
- JOIN  25vw2s4mrt5yb6rgyb5mr3kraxdyrocfuvmznf2dgaf6776akqrneqyd.onion │ token …
- copy: zorpinvader --client 25vw2s4mrt5yb6rgyb5mr3kraxdyrocfuvmznf2dgaf6776akqrneqyd.onion --token …
+ JOIN  25vw2s4mrt5yb6rgyb5mr3kraxdyrocfuvmznf2dgaf6776akqrneqyd.onion
+ copy: zorpinvader --client 25vw2s4mrt5yb6rgyb5mr3kraxdyrocfuvmznf2dgaf6776akqrneqyd.onion
 ```
+
+When a token is configured it appears next to the address (`│ token …`) and in
+the copy line.
 
 The `JOIN` panel is pinned to the bottom for the whole run, like a room code:
 the address stays on screen and selectable, so a new node can be added at any

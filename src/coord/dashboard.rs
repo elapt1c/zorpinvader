@@ -320,10 +320,14 @@ fn join_panel(connection: Option<&ConnectionInfo>) -> (String, String) {
         None => conn.url.clone(),
     };
 
-    let headline = format!(
-        " \x1b[1;97mJOIN\x1b[0m  \x1b[1;36m{}\x1b[0m \x1b[90m│\x1b[0m \x1b[33mtoken {}\x1b[0m",
-        address, conn.token
-    );
+    let headline = if conn.token.is_empty() {
+        format!(" \x1b[1;97mJOIN\x1b[0m  \x1b[1;36m{}\x1b[0m", address)
+    } else {
+        format!(
+            " \x1b[1;97mJOIN\x1b[0m  \x1b[1;36m{}\x1b[0m \x1b[90m│\x1b[0m \x1b[33mtoken {}\x1b[0m",
+            address, conn.token
+        )
+    };
     let command = if conn.connect.is_empty() {
         String::new()
     } else {
@@ -510,6 +514,17 @@ mod tests {
 
         let (empty, _) = join_panel(None);
         assert!(empty.contains("no connection information"));
+
+        // An open controller advertises the address and nothing else.
+        let open = ConnectionInfo {
+            onion: Some(onion),
+            token: String::new(),
+            connect: "zorpinvader --client abc.onion".into(),
+            ..Default::default()
+        };
+        let (headline, command) = join_panel(Some(&open));
+        assert!(!headline.contains("token"), "headline: {}", headline);
+        assert!(!command.contains("--token"), "command: {}", command);
     }
 
     #[test]

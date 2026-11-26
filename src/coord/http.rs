@@ -173,13 +173,6 @@ pub fn token_matches(expected: &str, presented: &str) -> bool {
     diff == 0
 }
 
-/// Random hex token, used when `--server-token` is not supplied.
-pub fn random_token() -> String {
-    let mut bytes = [0u8; 24];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,12 +185,4 @@ mod tests {
         assert!(!token_matches("", ""));
     }
 
-    #[test]
-    fn random_tokens_are_hex_and_unique() {
-        let a = random_token();
-        let b = random_token();
-        assert_eq!(a.len(), 48);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(a, b);
-    }
 }

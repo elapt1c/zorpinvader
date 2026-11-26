@@ -468,7 +468,8 @@ pub struct Zorp {
     /// Controller listen address (default 0.0.0.0).
     pub server_bind: String,
 
-    /// Shared secret; the controller generates one when not supplied.
+    /// Optional shared secret. Without it the controller accepts any worker that
+    /// has the address (onion or URL).
     pub token: Option<String>,
 
     /// Controller base URL (`--client <url>`).
@@ -1426,7 +1427,8 @@ Common options:
 Distributed scanning:
     --server <port>      Run a controller: plan blocks and hand them to clients
     --server-bind <ip>   Controller listen address (default: 0.0.0.0)
-    --token <secret>     Shared secret; printed by the controller if omitted
+    --token <secret>     Optional shared secret; without it the controller is
+                         open to any worker that has the address
     --client <url>       Join a controller (http:// or https://) and scan blocks
     --client-name <name> Client name shown in the controller status (default: hostname)
     --job-size <addrs>   Addresses per block (default: automatic, keeps blocks ≤ 65536)
