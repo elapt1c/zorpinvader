@@ -124,14 +124,16 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
             scheduler.progress(
                 "local",
                 job.job_id,
-                progress.pos,
-                progress.syns,
-                progress.synacks,
-                progress.total,
-                progress.hits,
-                0,
-                0.0,
-                &job.cidr,
+                &super::scheduler::Progress {
+                    pos: progress.pos,
+                    total: progress.total,
+                    syns: progress.syns,
+                    synacks: progress.synacks,
+                    hits: progress.hits,
+                    keys: 0,
+                    rate: 0.0,
+                    block: job.cidr.clone(),
+                },
             );
 
             if progress.syns > 0 {
@@ -192,7 +194,16 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
             );
 
         if outcome.completed {
-            if let Err(e) = scheduler.complete("local", job.job_id, outcome.pos, outcome.syns, outcome.synacks) {
+            if let Err(e) = scheduler.complete("local", job.job_id, &super::scheduler::Progress {
+                pos: outcome.pos,
+                total: outcome.total,
+                syns: outcome.syns,
+                synacks: outcome.synacks,
+                hits: outcome.hits.len() as u64,
+                keys: outcome.keys.len() as u64,
+                rate: 0.0,
+                block: job.cidr.clone(),
+            }) {
                 eprintln!("\nERROR: cannot record block {}: {}", job.job_id, e);
             } else {
                 blocks_scanned += 1;

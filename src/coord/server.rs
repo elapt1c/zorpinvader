@@ -551,14 +551,16 @@ fn handle_progress(request: &Request, app: &AppState) -> (u16, String) {
     let (rate, cancel) = sched.progress(
         &body.client_id,
         body.job_id,
-        body.pos,
-        body.syns,
-        body.synacks,
-        body.total,
-        body.hits,
-        body.keys,
-        body.rate,
-        &body.block,
+        &super::scheduler::Progress {
+            pos: body.pos,
+            total: body.total,
+            syns: body.syns,
+            synacks: body.synacks,
+            hits: body.hits,
+            keys: body.keys,
+            rate: body.rate,
+            block: body.block,
+        },
     );
     (
         200,
@@ -606,7 +608,26 @@ fn handle_complete(request: &Request, app: &AppState) -> (u16, String) {
         Err(e) => return (400, error_json(&e)),
     };
     let mut sched = app.sched.lock();
-    match sched.complete(&body.client_id, body.job_id, body.pos, body.syns, body.synacks) {
+    let block = if body.block.is_empty() {
+        sched
+            .plan
+            .block(body.job_id)
+            .map(|b| b.cidr())
+            .unwrap_or_default()
+    } else {
+        body.block.clone()
+    };
+    let progress = super::scheduler::Progress {
+        pos: body.pos,
+        total: body.total,
+        syns: body.syns,
+        synacks: body.synacks,
+        hits: body.hits,
+        keys: body.keys,
+        rate: body.rate,
+        block,
+    };
+    match sched.complete(&body.client_id, body.job_id, &progress) {
         Ok(duplicate) => (
             200,
             json(&CompleteResponse {

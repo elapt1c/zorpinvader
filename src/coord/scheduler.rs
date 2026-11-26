@@ -66,6 +66,22 @@ pub struct JobSpec {
     pub tpc: usize,
 }
 
+/// What a client tells the controller about the block it is working on. Sent as
+/// telemetry every few seconds, and again with the block's completion — short
+/// blocks finish before any periodic report, so completion is what keeps the
+/// dashboard honest.
+#[derive(Clone, Debug, Default)]
+pub struct Progress {
+    pub pos: u64,
+    pub total: u64,
+    pub syns: u64,
+    pub synacks: u64,
+    pub hits: u64,
+    pub keys: u64,
+    pub rate: f64,
+    pub block: String,
+}
+
 /// One confirmed key, as shown in the controller's key log.
 #[derive(Clone, Debug)]
 pub struct KeyEvent {
@@ -126,6 +142,9 @@ struct ClientEntry {
     total: u64,
     hits: u64,
     keys: u64,
+    /// Blocks this node has finished. Per-block progress is meaningless when a
+    /// block is shorter than the telemetry interval; this always moves.
+    blocks: u64,
 }
 
 /// Durable slice of a scheduler.
@@ -173,7 +192,7 @@ pub struct Scheduler {
     created: String,
     dirty: bool,
     rate_pps: f64,
-    last_rate_sample: (Instant, u64),
+    rate_window: VecDeque<(Instant, u64)>,
     connection: Option<ConnectionInfo>,
     keys_log: VecDeque<KeyEvent>,
     key_log_cap: usize,
@@ -205,7 +224,7 @@ impl Scheduler {
             created: super::results::timestamp(),
             dirty: false,
             rate_pps: 0.0,
-            last_rate_sample: (Instant::now(), 0),
+            rate_window: VecDeque::new(),
             connection: None,
             keys_log: VecDeque::new(),
             key_log_cap: 200,
@@ -284,7 +303,6 @@ impl Scheduler {
         // next_ptr would point into a different permutation.
         self.seed = state.seed;
         self.order = shuffle_order(self.plan.blocks_len(), state.seed);
-        self.last_rate_sample = (Instant::now(), self.stats.syns);
 
         log::info!(
             "[state] resumed {}: {} blocks done, {} partial, next ptr {}/{}",
@@ -454,8 +472,6 @@ impl Scheduler {
             entry.total = block
                 .map(|b| b.len().saturating_mul(self.plan.ports_count()))
                 .unwrap_or(0);
-            entry.hits = 0;
-            entry.keys = 0;
         }
         self.dirty = true;
     }
@@ -478,20 +494,7 @@ impl Scheduler {
 
     /// Record client progress and renew its lease.
     /// Record client telemetry and renew its lease.
-    #[allow(clippy::too_many_arguments)]
-    pub fn progress(
-        &mut self,
-        client_id: &str,
-        job_id: u64,
-        pos: u64,
-        syns: u64,
-        synacks: u64,
-        total: u64,
-        hits: u64,
-        keys: u64,
-        rate: f64,
-        block: &str,
-    ) -> (f64, bool) {
+    pub fn progress(&mut self, client_id: &str, job_id: u64, p: &Progress) -> (f64, bool) {
         self.touch(client_id);
         let now = Instant::now();
 
@@ -514,34 +517,34 @@ impl Scheduler {
                 // stop burning packets on it.
                 cancel = true;
             } else {
-                entry.pos = pos;
+                entry.pos = p.pos;
                 entry.lease_until = now + Duration::from_secs(self.opts.lease_s);
 
                 let dt = now.duration_since(entry.last_sample).as_secs_f64();
-                let instant = syns.saturating_sub(entry.last_syns) as f64 / dt.max(1e-3);
+                let instant = p.syns.saturating_sub(entry.last_syns) as f64 / dt.max(1e-3);
                 if dt > 0.2 {
                     entry.pps = if entry.pps > 0.0 {
                         entry.pps * 0.7 + instant * 0.3
                     } else {
                         instant
                     };
-                    entry.last_syns = syns;
+                    entry.last_syns = p.syns;
                     entry.last_sample = now;
                 }
 
                 // The client reports counters for the current job, so the delta
                 // is against the previous report for this job and resets
                 // naturally when the client moves to the next block.
-                if syns > entry.reported_syns {
-                    delta_syns = syns - entry.reported_syns;
-                    entry.reported_syns = syns;
+                if p.syns > entry.reported_syns {
+                    delta_syns = p.syns - entry.reported_syns;
+                    entry.reported_syns = p.syns;
                 }
-                if synacks > entry.reported_synacks {
-                    delta_synacks = synacks - entry.reported_synacks;
-                    entry.reported_synacks = synacks;
+                if p.synacks > entry.reported_synacks {
+                    delta_synacks = p.synacks - entry.reported_synacks;
+                    entry.reported_synacks = p.synacks;
                 }
 
-                pps = if rate > 0.0 { rate } else { entry.pps };
+                pps = if p.rate > 0.0 { p.rate } else { entry.pps };
                 entry.pps = pps;
                 reporting = true;
             }
@@ -554,14 +557,14 @@ impl Scheduler {
                 client.syns += delta_syns;
                 client.synacks += delta_synacks;
                 client.pps = pps;
-                if total > 0 {
-                    client.total = total;
+                if p.total > 0 {
+                    client.total = p.total;
                 }
-                client.pos = pos;
-                client.hits = client.hits.max(hits);
-                client.keys = client.keys.max(keys);
-                if !block.is_empty() {
-                    client.block = block.to_string();
+                client.pos = p.pos;
+                client.hits = client.hits.max(p.hits);
+                client.keys = client.keys.max(p.keys);
+                if !p.block.is_empty() {
+                    client.block = p.block.clone();
                 }
             }
             if delta_syns > 0 {
@@ -657,9 +660,7 @@ impl Scheduler {
         &mut self,
         client_id: &str,
         job_id: u64,
-        _pos: u64,
-        syns: u64,
-        synacks: u64,
+        p: &Progress,
     ) -> Result<bool, String> {
         self.touch(client_id);
         let block = self
@@ -667,7 +668,26 @@ impl Scheduler {
             .block(job_id)
             .ok_or_else(|| format!("unknown job {}", job_id))?;
 
-        self.account_counters(client_id, job_id, syns, synacks);
+        self.account_counters(client_id, job_id, p.syns, p.synacks);
+        // The block is finished: record what it achieved, so a node running
+        // blocks shorter than the telemetry interval still shows real numbers.
+        if let Some(client) = self.clients.get_mut(client_id) {
+            client.pos = if p.pos > 0 { p.pos } else { block.len() };
+            client.total = if p.total > 0 {
+                p.total
+            } else {
+                block.len().saturating_mul(self.plan.ports_count())
+            };
+            client.hits += p.hits;
+            client.keys += p.keys;
+            client.blocks += 1;
+            if p.rate > 0.0 {
+                client.pps = p.rate;
+            }
+            if !p.block.is_empty() {
+                client.block = p.block.clone();
+            }
+        }
 
         let duplicate = self.is_covered(block.begin);
         self.done.add(block.begin, block.end);
@@ -776,6 +796,7 @@ impl Scheduler {
             total: 0,
             hits: 0,
             keys: 0,
+            blocks: 0,
         });
         entry.last_seen = Instant::now();
     }
@@ -793,6 +814,7 @@ impl Scheduler {
             total: 0,
             hits: 0,
             keys: 0,
+            blocks: 0,
         });
         entry.name = name.to_string();
         entry.last_seen = Instant::now();
@@ -861,18 +883,31 @@ impl Scheduler {
         self.started.elapsed().as_secs()
     }
 
+    /// Aggregate rate over a rolling window. A 0.5s instantaneous sample makes
+    /// the dashboard swing wildly when blocks are only a couple of seconds long;
+    /// averaging over the last several samples shows the throughput people
+    /// actually care about, and a stable ETA follows from it.
     fn refresh_rate(&mut self) {
         let now = Instant::now();
-        let (then, syns_then) = self.last_rate_sample;
-        let dt = now.duration_since(then).as_secs_f64();
-        if dt >= 0.5 {
-            let instant = self.stats.syns.saturating_sub(syns_then) as f64 / dt;
-            self.rate_pps = if self.rate_pps > 0.0 {
-                self.rate_pps * 0.6 + instant * 0.4
-            } else {
-                instant
-            };
-            self.last_rate_sample = (now, self.stats.syns);
+        let too_soon = self
+            .rate_window
+            .back()
+            .map(|(at, _)| at.elapsed() < Duration::from_secs(1))
+            .unwrap_or(false);
+        if too_soon {
+            return;
+        }
+
+        self.rate_window.push_back((now, self.stats.syns));
+        while self.rate_window.len() > 12 {
+            self.rate_window.pop_front();
+        }
+
+        if let Some((started, syns_then)) = self.rate_window.front().copied() {
+            let dt = now.duration_since(started).as_secs_f64();
+            if dt > 0.5 {
+                self.rate_pps = self.stats.syns.saturating_sub(syns_then) as f64 / dt;
+            }
         }
     }
 
@@ -915,6 +950,7 @@ impl Scheduler {
                 total: c.total,
                 hits: c.hits,
                 keys: c.keys,
+                blocks: c.blocks,
             })
             .collect();
         clients.sort_by(|a, b| b.pps.partial_cmp(&a.pps).unwrap_or(std::cmp::Ordering::Equal));
@@ -1014,6 +1050,16 @@ mod tests {
         Plan::new("80,443", RangeSet4::from_cidrs(&[cidr]).unwrap(), chunk, 1234)
     }
 
+    /// Telemetry with counters only, which is all most tests care about.
+    fn prog(pos: u64, syns: u64, synacks: u64) -> Progress {
+        Progress {
+            pos,
+            syns,
+            synacks,
+            ..Default::default()
+        }
+    }
+
     fn job_of(claim: Claim) -> JobSpec {
         match claim {
             Claim::Job(j) => *j,
@@ -1032,7 +1078,7 @@ mod tests {
             match sched.claim("c1") {
                 Claim::Job(j) => {
                     seen.push(j.job_id);
-                    sched.complete("c1", j.job_id, j.resume_pos, 0, 0).unwrap();
+                    sched.complete("c1", j.job_id, &prog(j.resume_pos, 0, 0)).unwrap();
                 }
                 Claim::Waiting => panic!("unexpected waiting"),
                 Claim::Done => break,
@@ -1056,10 +1102,10 @@ mod tests {
             let mut sched = Scheduler::load_or_create(plan.clone(), opts(&dir)).unwrap();
             let j = job_of(sched.claim("c1"));
             done_len = j.end as u64 - j.begin as u64 + 1;
-            sched.complete("c1", j.job_id, 0, 0, 0).unwrap();
+            sched.complete("c1", j.job_id, &prog(0, 0, 0)).unwrap();
             // Lease a second block but never finish it.
             let j2 = job_of(sched.claim("c1"));
-            sched.progress("c1", j2.job_id, 512, 1000, 12, 0, 0, 0, 0.0, "");
+            sched.progress("c1", j2.job_id, &prog(512, 1000, 12));
             sched.save().unwrap();
         }
 
@@ -1081,7 +1127,7 @@ mod tests {
         let mut sched = Scheduler::load_or_create(plan, opts(&dir)).unwrap();
 
         let j = job_of(sched.claim("c1"));
-        sched.progress("c1", j.job_id, 300, 10, 1, 0, 0, 0, 0.0, "");
+        sched.progress("c1", j.job_id, &prog(300, 10, 1));
         std::thread::sleep(Duration::from_millis(1200));
         sched.reap();
 
@@ -1092,7 +1138,7 @@ mod tests {
         assert_eq!(again.job_id, j.job_id);
         assert_eq!(again.resume_pos, 300);
         // The old client is told to stop.
-        let (_rate, cancel) = sched.progress("c1", j.job_id, 400, 20, 2, 0, 0, 0, 0.0, "");
+        let (_rate, cancel) = sched.progress("c1", j.job_id, &prog(400, 20, 2));
         assert!(cancel);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1121,7 +1167,7 @@ mod tests {
             let plan = plan("10.0.0.0/24", 256);
             let mut sched = Scheduler::load_or_create(plan, opts_v.clone()).unwrap();
             let j = job_of(sched.claim("c1"));
-            sched.complete("c1", j.job_id, 0, 0, 0).unwrap();
+            sched.complete("c1", j.job_id, &prog(0, 0, 0)).unwrap();
             done_addr = sched.plan.block(j.job_id).unwrap().len();
             sched.save().unwrap();
         }
@@ -1158,10 +1204,42 @@ mod tests {
         sched.submit_results("a", j.job_id, &[], &[], 2000, 40);
         assert_eq!(sched.status().syns, 2000);
         // A later block on the same client keeps accumulating.
-        sched.complete("a", j.job_id, 0, 0, 0).unwrap();
+        sched.complete("a", j.job_id, &prog(0, 0, 0)).unwrap();
         let j2 = job_of(sched.claim("a"));
         sched.submit_results("a", j2.job_id, &[], &[], 500, 10);
         assert_eq!(sched.status().syns, 2500);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_block_shorter_than_the_telemetry_interval_still_shows_its_numbers() {
+        // 262144 probes at 160k pps is under two seconds: no periodic report is
+        // ever sent, so completion has to carry the numbers.
+        let dir = temp_dir("short-block");
+        let plan = plan("10.0.0.0/24", 256);
+        let mut sched = Scheduler::load_or_create(plan, opts(&dir)).unwrap();
+        let j = job_of(sched.claim("a"));
+        let p = Progress {
+            pos: 262_144,
+            total: 262_144,
+            syns: 262_144,
+            synacks: 51,
+            hits: 51,
+            keys: 2,
+            rate: 160_000.0,
+            block: "86.46.0.0/16".into(),
+        };
+        sched.complete("a", j.job_id, &p).unwrap();
+
+        let status = sched.status();
+        let client = status.clients.first().expect("client should be listed");
+        assert_eq!(client.pos, 262_144);
+        assert_eq!(client.total, 262_144);
+        assert_eq!(client.hits, 51);
+        assert_eq!(client.keys, 2);
+        assert!(client.pps > 100_000.0, "pps was {}", client.pps);
+        assert_eq!(client.block, "86.46.0.0/16");
+        assert_eq!(client.blocks, 1, "a finished block must count");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

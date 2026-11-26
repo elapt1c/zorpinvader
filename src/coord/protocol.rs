@@ -203,6 +203,19 @@ pub struct CompleteRequest {
     pub syns: u64,
     #[serde(default)]
     pub synacks: u64,
+    /// Also the block's final telemetry. Blocks are often shorter than the
+    /// progress interval (a /16 at 160k pps is under two seconds), so without
+    /// this the dashboard never sees a position, a rate or a hit count.
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub hits: u64,
+    #[serde(default)]
+    pub keys: u64,
+    #[serde(default)]
+    pub rate: f64,
+    #[serde(default)]
+    pub block: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -246,6 +259,10 @@ pub struct ClientSnapshot {
     pub hits: u64,
     #[serde(default)]
     pub keys: u64,
+    /// Blocks this node has finished, so a row shows progress even when the
+    /// current block is shorter than the telemetry interval.
+    #[serde(default)]
+    pub blocks: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

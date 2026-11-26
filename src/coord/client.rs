@@ -328,6 +328,7 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         // Keys drained during telemetry plus whatever landed at block end.
         let mut all_keys = block_keys;
         all_keys.extend(outcome.keys.iter().cloned());
+        let key_count = all_keys.len() as u64;
 
         eprintln!(
             "\n[client] block {} {} pos {}/{} syns {} synacks {} hits {} keys {}",
@@ -374,6 +375,13 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
                     pos: outcome.pos,
                     syns: outcome.syns,
                     synacks: outcome.synacks,
+                    // Short blocks finish before any periodic telemetry; the
+                    // completion carries the block's numbers instead.
+                    total: outcome.total,
+                    hits: outcome.hits.len() as u64,
+                    keys: key_count,
+                    rate: smooth_pps,
+                    block: spec.cidr.clone(),
                 },
                 &stop,
             ) {

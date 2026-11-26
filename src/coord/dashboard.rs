@@ -118,8 +118,8 @@ impl Dashboard {
             &mut out,
             row,
             &format!(
-                "\x1b[1;37m {:16} {:22} {:6} {:12} {:>8} {:>6} {:>5} {:>4}\x1b[0m",
-                "NODE", "BLOCK", "PROG", "BAR", "PPS", "HITS", "KEYS", "IDLE"
+                "\x1b[1;37m {:16} {:22} {:6} {:12} {:>8} {:>6} {:>5} {:>5} {:>4}\x1b[0m",
+                "NODE", "BLOCK", "PROG", "BAR", "PPS", "HITS", "KEYS", "BLK", "IDLE"
             ),
         );
         row += 1;
@@ -150,21 +150,29 @@ impl Dashboard {
                 } else {
                     0.0
                 };
+                // A block that was just claimed has no measurements yet; "—" is
+                // honest, "0.0%" reads like the node is stuck.
+                let progress_text = if client.pos == 0 && client.total > 0 {
+                    "    —".to_string()
+                } else {
+                    format!("{:>5.1}%", pct)
+                };
                 let state_color = if client.idle_s > 30 {
                     "\x1b[90m"
                 } else {
                     "\x1b[0m"
                 };
                 let line = format!(
-                    " {}{:16}\x1b[0m {:22} {:>5.1}% {:12} {:>8} {:>6} {:>5} {:>3}s",
+                    " {}{:16}\x1b[0m {:22} {} {:12} {:>8} {:>6} {:>5} {:>5} {:>3}s",
                     state_color,
                     clip(&client.name, 16),
                     clip(&client.block, 22),
-                    pct,
+                    progress_text,
                     bar(pct, 10),
                     rate(client.pps),
                     client.hits,
                     client.keys,
+                    client.blocks,
                     client.idle_s
                 );
                 push_row(&mut out, row, &truncate(&line, width));
@@ -252,13 +260,14 @@ impl Dashboard {
                 0.0
             };
             println!(
-                "[node] {:<20} {:<22} {:>5.1}% {:>8} hits {:<5} keys {:<4} idle {}s",
+                "[node] {:<20} {:<22} {:>5.1}% {:>8} hits {:<5} keys {:<4} blocks {:<5} idle {}s",
                 clip(&client.name, 20),
                 clip(&client.block, 22),
                 pct,
                 rate(client.pps),
                 client.hits,
                 client.keys,
+                client.blocks,
                 client.idle_s
             );
         }

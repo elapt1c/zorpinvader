@@ -424,9 +424,17 @@ the address stays on screen and selectable, so a new node can be added at any
 point by copying that line. It shows the onion address when `--tor` is on, and
 the dialable `http://` URL otherwise.
 
-Clients report telemetry every 5 seconds (block, position, rate, hits, keys);
-the controller redraws every second. Without a terminal — systemd, a log file —
-the same information is printed as periodic plain lines instead.
+Clients report telemetry every 5 seconds (block, position, rate, hits, keys), and
+again with every completed block — a /16 at 160k pps finishes in under two
+seconds, so completion is what keeps the view honest. The controller redraws
+every second and averages the rate over the last few samples, so a fast scan does
+not flicker between "160k" and "0".
+
+`BLK` is the number of blocks that node has finished: per-block progress (`PROG`)
+resets with every block, which for short blocks means it is usually near zero,
+and `—` means a block was just claimed and nothing has been reported yet.
+Without a terminal — systemd, a log file — the same information is printed as
+periodic plain lines instead.
 
 ## Output
 
