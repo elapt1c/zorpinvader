@@ -30,8 +30,9 @@ use super::set4::RangeSet4;
 pub const STATE_VERSION: u32 = 1;
 
 /// Seconds a block stays leased without a progress report before it is handed
-/// back to the pool.
-pub const DEFAULT_LEASE_S: u64 = 180;
+/// back to the pool and its client is dropped. Clients report every 5s, so 30s
+/// of silence means the node is gone, not slow.
+pub const DEFAULT_LEASE_S: u64 = 30;
 
 /// A client that has not been heard from for this long is dropped from the
 /// status view and from the rate split.
@@ -500,6 +501,13 @@ impl Scheduler {
         let mut pps = 0.0f64;
         let mut reporting = false;
 
+        // Reclaimed by reap(): the block is back in the pool (or already
+        // re-leased), so this client must stop even though it no longer has an
+        // entry to compare against.
+        if !self.inflight.contains_key(&job_id) && self.partial.contains_key(&job_id) {
+            cancel = true;
+        }
+
         if let Some(entry) = self.inflight.get_mut(&job_id) {
             if entry.client != client_id {
                 // The lease expired and the block moved on; tell this client to
@@ -721,17 +729,21 @@ impl Scheduler {
 
         for id in expired {
             if let Some(entry) = self.inflight.remove(&id) {
-                log::warn!(
-                    "[sched] lease expired for block {} (client {}) at pos {}",
-                    id,
-                    entry.client,
-                    entry.pos
+                let name = self
+                    .clients
+                    .get(&entry.client)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| entry.client.clone());
+                // Operator-visible: a node dropping out is the thing you want to
+                // see in a log, and env_logger's default level hides warnings.
+                eprintln!(
+                    "[ctrl] {} went silent for {}s holding block {} at pos {} — dropped from the scan",
+                    name, self.opts.lease_s, id, entry.pos
                 );
-                if let Some(client) = self.clients.get_mut(&entry.client) {
-                    if client.job == Some(id) {
-                        client.job = None;
-                    }
-                }
+                // A node that stops reporting is treated as gone: its work goes
+                // back to the pool and it leaves the client table, so the
+                // dashboard shows what is actually running.
+                self.clients.remove(&entry.client);
                 self.partial.insert(id, entry.pos);
                 self.dirty = true;
             }
@@ -1072,6 +1084,9 @@ mod tests {
         sched.progress("c1", j.job_id, 300, 10, 1, 0, 0, 0, 0.0, "");
         std::thread::sleep(Duration::from_millis(1200));
         sched.reap();
+
+        // The silent client is dropped from the scan, not just its block.
+        assert!(sched.clients.get("c1").is_none());
 
         let again = job_of(sched.claim("c2"));
         assert_eq!(again.job_id, j.job_id);

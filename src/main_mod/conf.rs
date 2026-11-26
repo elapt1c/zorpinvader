@@ -507,6 +507,10 @@ pub struct Zorp {
 
     /// Seconds to wait for tor to bootstrap.
     pub tor_timeout: u64,
+
+    /// Install missing runtime tools (tor, curl) with the distro's package
+    /// manager instead of failing.
+    pub auto_install: bool,
 }
 
 impl Default for Zorp {
@@ -586,12 +590,14 @@ impl Default for Zorp {
             state_file: PathBuf::from("zorpinvader.progress"),
             results_dir: PathBuf::from("."),
             job_size: 0,
-            lease_s: 180,
+            // Single source of truth: the scheduler's own default.
+            lease_s: crate::coord::scheduler::DEFAULT_LEASE_S,
             tor: false,
             tor_socks: None,
             tor_binary: None,
             tor_dir: None,
             tor_timeout: 180,
+            auto_install: true,
         }
     }
 }
@@ -1257,6 +1263,14 @@ impl Zorp {
                 self.tor_dir = Some(PathBuf::from(value));
             }
 
+            "install" | "auto-install" | "tor-install" => {
+                self.auto_install = Self::parse_boolean(value);
+            }
+
+            "no-install" => {
+                self.auto_install = false;
+            }
+
             "tor-timeout" => {
                 self.tor_timeout = value
                     .parse()
@@ -1366,6 +1380,7 @@ impl Zorp {
                 | "fresh"
                 | "no-resume"
                 | "tor"
+                | "no-install"
         )
     }
 
@@ -1461,7 +1476,8 @@ Distributed scanning:
     --client <url>       Join a controller (http:// or https://) and scan blocks
     --client-name <name> Client name shown in the controller status (default: hostname)
     --job-size <addrs>   Addresses per block (default: automatic, keeps blocks ≤ 65536)
-    --lease <seconds>    Lease before a silent client's block is reassigned (default: 180)
+    --lease <seconds>    Silence before a client is dropped and its block
+                         reassigned (default: 30; clients report every 5s)
     --state <file>       Progress file: coverage, leases, onion address, token
                          (default: zorpinvader.progress)
     --results-dir <dir>  Where results are written (default: current directory)

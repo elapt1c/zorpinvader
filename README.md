@@ -61,6 +61,19 @@ Libc: musl (static)
 Each asset ships with a `.sha256` file; check it with `sha256sum -c`. Tarballs
 are provided too, for hosts that would rather unpack than download a raw binary.
 
+Running a worker is a single line — no tor, no Rust, nothing to configure:
+
+```bash
+curl -fsSL -o /tmp/zi https://github.com/elapt1c/zorpinvader/releases/latest/download/zorpinvader-x86_64-linux-musl \
+  && chmod +x /tmp/zi && sudo /tmp/zi --client
+#                                                       ^ append the .onion address
+```
+
+Missing tools are installed automatically through the distribution's package
+manager (`tor` when tor transport is used, `curl` for fetching), with the exact
+command printed first. `--no-install` turns that into an error naming the command
+instead, for hosts where nothing may be installed.
+
 The full runtime dependency list is:
 
 | Need | Why |
@@ -124,12 +137,13 @@ sudo ./bin/zorpinvader --resume --rate 10000 -p 80,443
 | `--client <url>` | Join a controller and scan its blocks | — |
 | `--client-name <name>` | Client name in the controller status | hostname |
 | `--token <secret>` | Optional shared secret; without it the controller is open | — |
-| `--lease <seconds>` | Lease on an unresponsive client's block | `180` |
+| `--lease <seconds>` | Silence before a client is dropped and its block reassigned | `30` |
 | `--tor` | Publish the controller on an onion service / force a client through tor | off |
 | `--tor-socks <h:p>` | Use an existing tor SOCKS proxy instead of starting one | auto (9050/9150) |
 | `--tor-binary <path>` | Explicit `tor` binary | from PATH |
 | `--tor-dir <dir>` | tor DataDirectory | `~/.tor/zorpinvader` |
 | `--tor-timeout <s>` | Bootstrap timeout | `180` |
+| `--no-install` | Never install missing tools automatically | off |
 | `--selftest` | Run regression tests | — |
 
 ## Distributed scanning
@@ -183,10 +197,12 @@ the dead worker last reported.
   scan is spread across the address space instead of walking it front to back.
   Within a block, probes go through a BlackRock permutation, so the wire order is
   random too.
-* Every block is **leased**, not assigned (`--lease`, default 180 s). A client that
-  stops reporting loses its block, which goes back to the pool and resumes at the
-  last reported position. A dead machine costs at most one lease interval of
-  duplicated work.
+* Every block is **leased**, not assigned. Clients report every 5 s, so **30 s of
+  silence means the node is gone**: it is dropped from the client table and its
+  block goes back to the pool, resuming at the last reported position. A dead
+  machine costs at most one lease interval of duplicated work. It is visible in
+  the log and in the dashboard (the node disappears).
+  `--lease <seconds>` changes the threshold.
 * `--rate` on the controller is an **aggregate**: it is divided between connected
   clients and rebalanced as they come and go. A client's own `--rate` is a
   ceiling, so `min(share, ceiling)` applies.

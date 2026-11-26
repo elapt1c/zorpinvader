@@ -68,6 +68,8 @@ pub struct TorConfig {
     /// Where this instance keeps its DataDirectory, log, pidfile and HS keys.
     pub data_dir: PathBuf,
     pub timeout: Duration,
+    /// Install tor through the distro's package manager when it is missing.
+    pub auto_install: bool,
 }
 
 impl TorConfig {
@@ -91,6 +93,7 @@ impl TorConfig {
             socks: None,
             data_dir,
             timeout: Duration::from_secs(180),
+            auto_install: true,
         }
     }
 }
@@ -371,28 +374,20 @@ fn find_tor_binary(cfg: &TorConfig) -> Result<PathBuf, String> {
         return Err(format!("--tor-binary {} does not exist", binary.display()));
     }
 
-    for candidate in ["/usr/bin/tor", "/usr/sbin/tor", "/usr/local/bin/tor", "/opt/homebrew/bin/tor"] {
-        let path = PathBuf::from(candidate);
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-    if let Ok(path_var) = std::env::var("PATH") {
-        for dir in path_var.split(':') {
-            let path = PathBuf::from(dir).join("tor");
-            if path.is_file() {
-                return Ok(path);
-            }
-        }
-    }
+    // tor is the one external program a tor transport cannot do without. Ask the
+    // distribution for it rather than making the user do it, unless told not to.
+    let mut path = super::deps::ensure_binary("tor", "tor", "tor transport", cfg.auto_install)?;
 
-    Err("tor is not installed. ZorpInvader supervises a real tor rather than \
-         reimplementing the Tor protocol; install it and retry:\n  \
-         Debian/Ubuntu: sudo apt install tor\n  \
-         Fedora:        sudo dnf install tor\n  \
-         macOS:         brew install tor\n\
-         Or point at an existing instance with --tor-socks 127.0.0.1:9050."
-        .to_string())
+    // Some packages install the binary in sbin, which a non-login shell may not
+    // have in PATH; if a reboot is needed to see it, say so plainly.
+    if !path.is_file() {
+        return Err(format!(
+            "tor was installed at {} but is not readable",
+            path.display()
+        ));
+    }
+    path = path.canonicalize().unwrap_or(path);
+    Ok(path)
 }
 
 fn canonical(path: &Path) -> PathBuf {

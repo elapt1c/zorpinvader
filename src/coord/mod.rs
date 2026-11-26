@@ -39,6 +39,7 @@
 //! * [`protocol`] — the JSON wire format.
 //! * [`http`] — a minimal HTTP/1.1 server.
 //! * [`tor`] — supervised tor: onion service for the controller, SOCKS5 for clients.
+//! * [`deps`] — tor/curl detection and installation through the distro's packages.
 //! * [`dashboard`] — the multi-node live view, including the shared key log.
 //! * [`server`] — the controller: HTTP handlers around a [`scheduler::Scheduler`].
 //! * [`client`] — the client loop: join → claim → scan → report.
@@ -47,6 +48,7 @@
 
 pub mod client;
 pub mod dashboard;
+pub mod deps;
 pub mod http;
 pub mod local;
 pub mod plan;

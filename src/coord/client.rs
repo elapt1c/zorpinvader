@@ -54,6 +54,7 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
                 .clone()
                 .unwrap_or_else(TorConfig::default_data_dir),
             timeout: Duration::from_secs(zorp.tor_timeout),
+            auto_install: zorp.auto_install,
         };
         match tor::start_client(&cfg) {
             Ok(handle) => {

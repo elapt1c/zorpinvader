@@ -79,6 +79,10 @@ impl ScanEngine {
     /// Initialize the adapter and the fetch/verify pipeline once. Every block
     /// scanned by this engine reuses them.
     pub fn new(zorp: &Zorp, tpc: usize, include_safe: bool) -> Result<Self, String> {
+        // The fetcher shells out to curl for every page and the client uses it
+        // for the control channel; without it a scan finds nothing.
+        crate::coord::deps::ensure_binary("curl", "curl", "the HTTP fetcher", zorp.auto_install)?;
+
         let mut targets = MassIP::new();
         for range_str in &zorp.target_ranges {
             let _ = targets.add_target_string(range_str.as_bytes());
