@@ -236,7 +236,7 @@ started on one machine and a worker on another by copying one line:
 
 ```bash
 $ cat zorpinvader.progress | jq -r .connect
-zorpinvader --client http://q3uod….onion --token sk-…
+zorpinvader --client q3uod….onion --token sk-…
 ```
 
 The file also carries `onion`, `url`, `listen` and `token`, and is written `0600`
@@ -248,7 +248,7 @@ because of the token.
   "url": "http://q3uod….onion",
   "listen": "0.0.0.0:8000",
   "token": "…",
-  "connect": "zorpinvader --client http://q3uod….onion --token …",
+  "connect": "zorpinvader --client q3uod….onion --token …",
   "done": ["10.9.0.0/28"], "partial": [], "next_ptr": 4, "syns": 16
 }
 ```
@@ -302,8 +302,14 @@ standalone scan shows, tagged with the node that found each key.
   00:49:27  EXAMPLEKEY_a…2345             stripe       node-alpha       10.9.0.7
   00:49:27  EXAMPLEKEY_b…6789             github       node-beta        10.9.1.42
 ──────────────────────────────────────────────────────────────────────────────
- attach: zorpinvader --client http://q3uod….onion --token …
+ JOIN  25vw2s4mrt5yb6rgyb5mr3kraxdyrocfuvmznf2dgaf6776akqrneqyd.onion │ token …
+ copy: zorpinvader --client 25vw2s4mrt5yb6rgyb5mr3kraxdyrocfuvmznf2dgaf6776akqrneqyd.onion --token …
 ```
+
+The `JOIN` panel is pinned to the bottom for the whole run, like a room code:
+the address stays on screen and selectable, so a new node can be added at any
+point by copying that line. It shows the onion address when `--tor` is on, and
+the dialable `http://` URL otherwise.
 
 Clients report telemetry every 5 seconds (block, position, rate, hits, keys);
 the controller redraws every second. Without a terminal — systemd, a log file —

@@ -63,7 +63,7 @@ impl Dashboard {
         let uptime = format_duration(status.elapsed_s);
         let endpoint = connection
             .and_then(|c| c.onion.clone())
-            .or_else(|| connection.map(|c| c.listen.clone()).filter(|l| !l.is_empty()))
+            .or_else(|| connection.map(|c| c.url.clone()).filter(|u| !u.is_empty()))
             .unwrap_or_else(|| status_endpoint(status));
         push_row(
             &mut out,
@@ -124,8 +124,8 @@ impl Dashboard {
         );
         row += 1;
 
-        // Nodes: reserve the footer space.
-        let footer_rows = 2 + KEY_ROWS + 2;
+        // Nodes: reserve the footer space (key log + the join panel).
+        let footer_rows = 2 + KEY_ROWS + 3;
         let node_slots = height.saturating_sub(row + footer_rows - 1).max(1);
         let mut nodes: Vec<&super::protocol::ClientSnapshot> = status.clients.iter().collect();
         nodes.sort_by(|a, b| {
@@ -205,17 +205,14 @@ impl Dashboard {
             row += 1;
         }
 
-        // Footer: how to attach another node.
+        // Footer: the join panel. Like a room code, it stays on screen for the
+        // whole run so it can be read off and pasted at any moment.
         push_row(&mut out, row, &format!("\x1b[90m{}\x1b[0m", sep));
         row += 1;
-        let hint = match connection {
-            Some(conn) if !conn.connect.is_empty() => {
-                format!(" \x1b[90mattach:\x1b[0m {}", clip(&conn.connect, width.saturating_sub(12)))
-            }
-            _ => " \x1b[90mno onion address; clients use http://<this-host>:<port>\x1b[0m"
-                .to_string(),
-        };
-        push_row(&mut out, row, &truncate(&hint, width));
+        let (headline, command) = join_panel(connection);
+        push_row(&mut out, row, &truncate(&headline, width));
+        row += 1;
+        push_row(&mut out, row, &truncate(&command, width));
 
         // Clear anything left from a taller previous frame.
         out.push_str(&format!("\x1b[{};1H\x1b[J", row + 1));
@@ -228,8 +225,13 @@ impl Dashboard {
     pub fn render_plain(&self, status: &StatusResponse, connection: Option<&ConnectionInfo>) {
         let endpoint = connection
             .and_then(|c| c.onion.clone())
-            .or_else(|| connection.map(|c| c.listen.clone()).filter(|l| !l.is_empty()))
+            .or_else(|| connection.map(|c| c.url.clone()).filter(|u| !u.is_empty()))
             .unwrap_or_else(|| status_endpoint(status));
+        if let Some(conn) = connection {
+            if !conn.connect.is_empty() {
+                println!("[join] {}", conn.connect);
+            }
+        }
         println!(
             "[ctrl] {} | {:.2}% {}/{} blocks | {} addrs | {} | {} clients | hits {} | keys {} | eta {}",
             endpoint,
@@ -298,6 +300,39 @@ fn term_size() -> (usize, usize) {
     } else {
         (FALLBACK_WIDTH, FALLBACK_HEIGHT)
     }
+}
+
+/// The two lines of the join panel: the address to read off, and the command to
+/// paste. Falls back to the listen address when no onion is published.
+fn join_panel(connection: Option<&ConnectionInfo>) -> (String, String) {
+    let conn = match connection {
+        Some(conn) => conn,
+        None => {
+            return (
+                " \x1b[1;97mJOIN\x1b[0m  \x1b[90mno connection information\x1b[0m".to_string(),
+                String::new(),
+            )
+        }
+    };
+
+    let address = match &conn.onion {
+        Some(onion) => onion.clone(),
+        None => conn.url.clone(),
+    };
+
+    let headline = format!(
+        " \x1b[1;97mJOIN\x1b[0m  \x1b[1;36m{}\x1b[0m \x1b[90m│\x1b[0m \x1b[33mtoken {}\x1b[0m",
+        address, conn.token
+    );
+    let command = if conn.connect.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " \x1b[90mcopy:\x1b[0m \x1b[32m{}\x1b[0m",
+            conn.connect
+        )
+    };
+    (headline, command)
 }
 
 fn status_endpoint(status: &StatusResponse) -> String {
@@ -445,6 +480,36 @@ mod tests {
         let line = "\x1b[32mabcdefghij\x1b[0m";
         let cut = truncate(line, 5);
         assert_eq!(cut, "\x1b[32mabcd");
+    }
+
+    #[test]
+    fn join_panel_shows_address_token_and_command() {
+        let onion = format!("{}.onion", "c".repeat(56));
+        let conn = ConnectionInfo {
+            listen: "0.0.0.0:8000".into(),
+            onion: Some(onion.clone()),
+            url: format!("http://{}", onion),
+            token: "tok123".into(),
+            connect: format!("zorpinvader --client {} --token tok123", onion),
+        };
+        let (headline, command) = join_panel(Some(&conn));
+        assert!(headline.contains(&onion), "headline: {}", headline);
+        assert!(headline.contains("token tok123"));
+        assert!(command.contains(&format!("--client {}", onion)));
+        // The escaped line must still fit a standard 110-column terminal.
+        assert!(truncate(&headline, 110).contains("tok123"));
+
+        // Without an onion the listen URL is the join address.
+        let plain = ConnectionInfo {
+            onion: None,
+            ..conn
+        };
+        let (headline, _) = join_panel(Some(&plain));
+        assert!(headline.contains("http://"));
+        assert!(headline.contains("token tok123"));
+
+        let (empty, _) = join_panel(None);
+        assert!(empty.contains("no connection information"));
     }
 
     #[test]

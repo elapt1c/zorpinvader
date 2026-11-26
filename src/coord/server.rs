@@ -138,7 +138,11 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         onion: onion.clone(),
         url: url.clone(),
         token: token.clone(),
-        connect: format!("zorpinvader --client {} --token {}", url, token),
+        // A bare onion address is what a human copies; the scheme is optional.
+        connect: match &onion {
+            Some(onion) => format!("zorpinvader --client {} --token {}", onion, token),
+            None => format!("zorpinvader --client {} --token {}", url, token),
+        },
     };
     scheduler.set_connection(connection.clone());
     if let Err(e) = scheduler.save() {
@@ -249,11 +253,24 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
     0
 }
 
-/// A bind address of `0.0.0.0` is not something a client can dial.
+/// A bind address of `0.0.0.0` is not something a client can dial, so advertise
+/// the machine's primary IPv4 instead. A UDP `connect` only consults the routing
+/// table; it sends no packets.
 fn display_host(bind: &str) -> String {
     match bind {
-        "0.0.0.0" | "::" | "" => "127.0.0.1".to_string(),
+        "0.0.0.0" | "::" | "" => primary_ipv4().unwrap_or_else(|| "127.0.0.1".to_string()),
         other => other.to_string(),
+    }
+}
+
+fn primary_ipv4() -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:53").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => {
+            Some(ip.to_string())
+        }
+        _ => None,
     }
 }
 
