@@ -128,7 +128,7 @@ sudo ./bin/zorpinvader --resume --rate 10000 -p 80,443
 | `--tor` | Publish the controller on an onion service / force a client through tor | off |
 | `--tor-socks <h:p>` | Use an existing tor SOCKS proxy instead of starting one | auto (9050/9150) |
 | `--tor-binary <path>` | Explicit `tor` binary | from PATH |
-| `--tor-dir <dir>` | tor DataDirectory | next to the progress file |
+| `--tor-dir <dir>` | tor DataDirectory | `~/.tor/zorpinvader` |
 | `--tor-timeout <s>` | Bootstrap timeout | `180` |
 | `--selftest` | Run regression tests | — |
 
@@ -355,10 +355,13 @@ system tor works for clients, and the controller can sit behind any tunnel.
 
 Two things trip it up in practice:
 
-* **sudo.** A controller needs no privileges — it never transmits packets. Under
-  sudo, tor's DataDirectory (next to the progress file) is a root-owned project
-  directory, and AppArmor's `tor` profile on Ubuntu/Debian only permits
-  `/var/lib/tor`, `/var/log/tor` and `~/.tor`. Run it as your normal user.
+* **sudo.** A controller needs no privileges — it never transmits packets, so
+  run it as yourself. Running under sudo writes root-owned files into the working
+  directory (`tor/`, `zorpinvader.progress`, `open_ports.csv`, `found_keys.csv`)
+  which then block every later run as your user. Fix a directory you already
+  poisoned with `sudo chown -R "$(id -u):$(id -g)" .`.
+  tor's DataDirectory defaults to `~/.tor/zorpinvader` — tor's own per-user
+  convention, and what tor's AppArmor profile on Ubuntu/Debian permits.
 * **A blocked network.** Tor stalling at 0–10% means it cannot reach the network,
   not that the tool is broken. Use a bridge, or point at a working tor with
   `--tor-socks`.

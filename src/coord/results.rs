@@ -14,6 +14,67 @@ use std::path::{Path, PathBuf};
 use super::protocol::KeyRecord;
 use super::set4::format_ip;
 
+/// Turn a write failure into something actionable. The usual cause is a file
+/// left root-owned by an earlier `sudo` run: it then blocks every later run as
+/// the normal user, and a bare "permission denied" gives no way to see that.
+pub fn write_hint(path: &Path, error: &std::io::Error) -> String {
+    let meta = std::fs::metadata(path).ok();
+    let owner = meta.as_ref().map(|m| {
+        use std::os::unix::fs::MetadataExt;
+        m.uid()
+    });
+    let me = unsafe { libc::geteuid() };
+
+    let mut msg = format!("cannot write {}: {}", path.display(), error);
+    match owner {
+        Some(owner) if owner != me => msg.push_str(&format!(
+            "\nIt is owned by uid {} but this process is uid {} — usually the \
+             leftovers of an earlier `sudo` run. Fix it with `sudo chown {} {}` \
+             (or remove the file).",
+            owner,
+            me,
+            me,
+            path.display()
+        )),
+        Some(_) => msg.push_str("\nCheck the directory permissions."),
+        None => {
+            if let Some(parent) = path.parent() {
+                msg.push_str(&format!(
+                    "\nThe directory {} must be writable by uid {}.",
+                    parent.display(),
+                    me
+                ));
+            }
+        }
+    }
+    msg
+}
+
+/// Fail early when the verifier's output file cannot be written: the verifier
+/// opens it best-effort, so a root-owned file would silently swallow keys.
+pub fn check_writable(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        return std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map(|_| ())
+            .map_err(|e| write_hint(path, &e));
+    }
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map(|_| {
+                    let _ = std::fs::remove_file(path);
+                })
+                .map_err(|e| write_hint(path, &e))
+        }
+        _ => Ok(()),
+    }
+}
+
 pub const HITS_FILE: &str = "open_ports.csv";
 pub const KEYS_FILE: &str = "found_keys.csv";
 
@@ -32,7 +93,8 @@ impl Results {
     /// Open (or create) both result files, seeding the de-duplication sets from
     /// whatever is already there.
     pub fn open(dir: &Path) -> Result<Self, String> {
-        std::fs::create_dir_all(dir).map_err(|e| format!("results dir {}: {}", dir.display(), e))?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create results directory {}: {}", dir.display(), e))?;
 
         let hits_path = dir.join(HITS_FILE);
         let keys_path = dir.join(KEYS_FILE);
@@ -149,9 +211,9 @@ fn ensure_header(path: &Path, header: &str) -> Result<(), String> {
     if !needs_header {
         return Ok(());
     }
-    let mut file = open_append(path).map_err(|e| format!("{}: {}", path.display(), e))?;
-    writeln!(file, "{}", header).map_err(|e| format!("{}: {}", path.display(), e))?;
-    file.flush().map_err(|e| format!("{}: {}", path.display(), e))?;
+    let mut file = open_append(path).map_err(|e| write_hint(path, &e))?;
+    writeln!(file, "{}", header).map_err(|e| write_hint(path, &e))?;
+    file.flush().map_err(|e| write_hint(path, &e))?;
     Ok(())
 }
 

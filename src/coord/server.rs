@@ -122,15 +122,13 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         mode: if zorp.tor { TorMode::Required } else { TorMode::Off },
         binary: zorp.tor_binary.clone(),
         socks: None,
-        data_dir: zorp.tor_dir.clone().unwrap_or_else(|| {
-            let parent = zorp
-                .state_file
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::path::PathBuf::from("."));
-            parent.join("tor")
-        }),
+        // ~/.tor/zorpinvader by default: tor's own per-user convention, which
+        // also avoids project directories that a previous sudo run left
+        // root-owned (and that tor's AppArmor profile refuses).
+        data_dir: zorp
+            .tor_dir
+            .clone()
+            .unwrap_or_else(TorConfig::default_data_dir),
         timeout: Duration::from_secs(zorp.tor_timeout),
     };
     if zorp.tor && unsafe { libc::geteuid() } == 0 {

@@ -59,6 +59,19 @@ pub struct TorConfig {
 }
 
 impl TorConfig {
+    /// Default DataDirectory: `~/.tor/zorpinvader`, which is tor's own
+    /// per-user convention (and what tor's AppArmor profile permits). A project
+    /// directory breaks in two ways: an earlier `sudo` run leaves it root-owned,
+    /// and the profile denies tor writing there at all.
+    pub fn default_data_dir() -> PathBuf {
+        match std::env::var_os("HOME") {
+            Some(home) if !home.is_empty() => {
+                PathBuf::from(home).join(".tor").join("zorpinvader")
+            }
+            _ => PathBuf::from("tor"),
+        }
+    }
+
     pub fn new(data_dir: PathBuf) -> Self {
         TorConfig {
             mode: TorMode::Off,
@@ -139,7 +152,7 @@ impl ManagedTor {
 /// Start tor and publish the controller on an onion service.
 pub fn start_server(listen_port: u16, cfg: &TorConfig) -> Result<TorHandle, String> {
     let binary = find_tor_binary(cfg)?;
-    std::fs::create_dir_all(&cfg.data_dir).map_err(|e| format!("{}: {}", cfg.data_dir.display(), e))?;
+    ensure_data_dir(&cfg.data_dir)?;
     let data_dir = canonical(&cfg.data_dir);
     reap_stale_tor(&data_dir);
 
@@ -153,6 +166,8 @@ pub fn start_server(listen_port: u16, cfg: &TorConfig) -> Result<TorHandle, Stri
     }
     // tor wants to create the HS dir itself, but its parent must exist.
     set_private_dir(&data_dir);
+
+    let console = console_to_file(&errfile)?;
 
     let mut cmd = Command::new(&binary);
     cmd.arg("--SocksPort")
@@ -170,11 +185,11 @@ pub fn start_server(listen_port: u16, cfg: &TorConfig) -> Result<TorHandle, Stri
         .arg("--CookieAuthentication")
         .arg("0")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
         // Never a pipe: nothing reads it, and a full pipe blocks tor, which
         // looks exactly like a bootstrap hang. A file keeps the early fatal
         // errors ("permission denied", AppArmor, bad torrc) without that.
-        .stderr(stderr_to_file(&errfile)?);
+        .stdout(console.0)
+        .stderr(console.1);
 
     let child = spawn(cmd, &binary)?;
     let pidfile = write_pidfile(&data_dir, child.id())?;
@@ -233,7 +248,7 @@ pub fn start_client(cfg: &TorConfig) -> Result<TorHandle, String> {
     }
 
     let binary = find_tor_binary(cfg)?;
-    std::fs::create_dir_all(&cfg.data_dir).map_err(|e| format!("{}: {}", cfg.data_dir.display(), e))?;
+    ensure_data_dir(&cfg.data_dir)?;
     let data_dir = canonical(&cfg.data_dir);
     reap_stale_tor(&data_dir);
     set_private_dir(&data_dir);
@@ -243,6 +258,8 @@ pub fn start_client(cfg: &TorConfig) -> Result<TorHandle, String> {
     let _ = std::fs::remove_file(&logfile);
     let _ = std::fs::remove_file(&errfile);
     let socks_port = free_port()?;
+
+    let console = console_to_file(&errfile)?;
 
     let mut cmd = Command::new(&binary);
     cmd.arg("--SocksPort")
@@ -254,8 +271,8 @@ pub fn start_client(cfg: &TorConfig) -> Result<TorHandle, String> {
         .arg("--ClientOnly")
         .arg("1")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(stderr_to_file(&errfile)?);
+        .stdout(console.0)
+        .stderr(console.1);
 
     let child = spawn(cmd, &binary)?;
     let pidfile = write_pidfile(&data_dir, child.id())?;
@@ -286,11 +303,19 @@ pub fn start_client(cfg: &TorConfig) -> Result<TorHandle, String> {
 // Internals
 // ---------------------------------------------------------------------------
 
-/// tor's stderr as a file: captured for diagnostics, but never a pipe nobody
-/// drains (a full pipe blocks tor and looks exactly like a bootstrap hang).
-fn stderr_to_file(path: &Path) -> Result<Stdio, String> {
+/// tor's console output as a file: captured for diagnostics, but never a pipe
+/// nobody drains (a full pipe blocks tor and looks exactly like a bootstrap
+/// hang).
+///
+/// Both stdout and stderr go here. tor writes its startup notices — and the
+/// ownership/permission errors that stop it — to stdout, so capturing only
+/// stderr loses exactly the line that explains a failure.
+fn console_to_file(path: &Path) -> Result<(Stdio, Stdio), String> {
     let file = std::fs::File::create(path).map_err(|e| format!("{}: {}", path.display(), e))?;
-    Ok(Stdio::from(file))
+    let clone = file
+        .try_clone()
+        .map_err(|e| format!("{}: {}", path.display(), e))?;
+    Ok((Stdio::from(file), Stdio::from(clone)))
 }
 
 fn spawn(mut cmd: Command, binary: &Path) -> Result<Child, String> {
@@ -354,6 +379,56 @@ fn find_tor_binary(cfg: &TorConfig) -> Result<PathBuf, String> {
 
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// A DataDirectory we cannot write to fails the whole run, so explain it
+/// properly: the usual cause is a directory left root-owned by an earlier
+/// `sudo` run, which then breaks every later run as the normal user.
+fn ensure_data_dir(dir: &Path) -> Result<(), String> {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return Err(format!(
+            "cannot create the tor data directory {}: {}\n\
+             Pass --tor-dir <dir> to put it somewhere else.",
+            dir.display(),
+            e
+        ));
+    }
+
+    let probe = dir.join(".zorpinvader-write-test");
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(e) => {
+            let owner = std::fs::metadata(dir)
+                .ok()
+                .map(|m| {
+                    use std::os::unix::fs::MetadataExt;
+                    m.uid()
+                })
+                .unwrap_or(u32::MAX);
+            let me = unsafe { libc::geteuid() };
+            let mut msg = format!(
+                "cannot write to the tor data directory {}: {}",
+                dir.display(),
+                e
+            );
+            if owner != me {
+                msg.push_str(&format!(
+                    "\nIt is owned by uid {} but this process is uid {} — usually the \
+                     leftovers of an earlier `sudo` run. Remove it (`sudo rm -rf {}`) or \
+                     pass --tor-dir <dir>.",
+                    owner,
+                    me,
+                    dir.display()
+                ));
+            } else {
+                msg.push_str("\nPass --tor-dir <dir> to put it somewhere writable.");
+            }
+            Err(msg)
+        }
+    }
 }
 
 fn set_private_dir(path: &Path) {

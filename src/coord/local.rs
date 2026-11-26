@@ -57,6 +57,13 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
         }
     };
 
+    // The verifier opens found_keys.csv best-effort; a root-owned leftover
+    // would silently discard every key, so check it before scanning.
+    if let Err(e) = super::results::check_writable(std::path::Path::new(super::results::KEYS_FILE)) {
+        eprintln!("ERROR: {}", e);
+        return 1;
+    }
+
     print_banner(&plan, &scheduler);
 
     let engine = match ScanEngine::new(&zorp, zorp.tpc, zorp.include_safe) {

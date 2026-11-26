@@ -49,15 +49,10 @@ pub fn run(zorp: Arc<Zorp>) -> i32 {
             mode: TorMode::Required,
             binary: zorp.tor_binary.clone(),
             socks: zorp.tor_socks.clone(),
-            data_dir: zorp.tor_dir.clone().unwrap_or_else(|| {
-                let parent = zorp
-                    .state_file
-                    .parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| PathBuf::from("."));
-                parent.join("tor")
-            }),
+            data_dir: zorp
+                .tor_dir
+                .clone()
+                .unwrap_or_else(TorConfig::default_data_dir),
             timeout: Duration::from_secs(zorp.tor_timeout),
         };
         match tor::start_client(&cfg) {
